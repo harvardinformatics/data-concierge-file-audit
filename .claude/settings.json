@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "disableBypassPermissionsMode": "disable",
+    "allow": [
+      "Edit(/audits/**)",
+      "Edit(/docs/**)",
+      "Bash(python3 .claude/skills/lab-storage-audit/scripts/*)",
+      "Bash(module load python*)",
+      "Bash(quota *)",
+      "Bash(lfs quota *)",
+      "Bash(hostname)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)"
+    ],
+    "ask": [
+      "Bash(sbatch *)", "Bash(scancel *)",
+      "Bash(squeue *)", "Bash(sacct *)",
+      "Bash(du *)", "Bash(find /*)", "Bash(lfs find *)",
+      "Bash(rm *)", "Bash(mv *)", "Bash(cp *)",
+      "Bash(chmod *)", "Bash(chown *)", "Bash(chgrp *)", "Bash(setfacl *)",
+      "Bash(touch /*)", "Bash(tar *)",
+      "Bash(ssh *)", "Bash(scp *)", "Bash(rsync *)",
+      "Bash(globus *)", "Bash(rclone *)",
+      "Bash(pip install *)", "Bash(pip3 install *)",
+      "Bash(conda install *)", "Bash(mamba install *)",
+      "Bash(conda create *)", "Bash(mamba create *)",
+      "Bash(uv pip install *)", "Bash(uv add *)",
+      "Bash(git push *)", "Bash(git commit *)"
+    ],
+    "deny": [
+      "Bash(sudo *)", "Bash(sudo)",
+      "Bash(curl *|*)", "Bash(wget *|*)",
+      "Bash(env)", "Bash(env *)",
+      "Bash(printenv)", "Bash(printenv *)",
+      "Bash(set)", "Bash(set *)",
+      "Read(//root/**)",
+      "Read(//**/.env)", "Read(//**/.env.*)",
+      "Read(//**/secrets/**)", "Read(//**/.secrets/**)",
+      "Read(//**/.ssh/**)", "Read(//**/.gnupg/**)",
+      "Read(//**/.aws/**)", "Read(//**/.kube/**)",
+      "Read(//**/.config/gcloud/**)", "Read(//**/.azure/**)",
+      "Read(//**/.docker/config.json)",
+      "Read(//**/.git-credentials)", "Read(//**/.netrc)",
+      "Read(//**/.pgpass)", "Read(//**/.my.cnf)",
+      "Read(//**/.pypirc)", "Read(//**/.npmrc)",
+      "Read(//**/.Renviron)",
+      "Read(//**/.irods/**)", "Read(//**/.globus*/**)",
+      "Read(//**/.ncbi/**)", "Read(//**/*.ngc)",
+      "Read(//**/id_rsa*)", "Read(//**/id_ed25519*)",
+      "Read(//**/id_ecdsa*)", "Read(//**/id_dsa*)",
+      "Read(//**/*.pem)", "Read(//**/*.key)",
+      "Read(//**/*credentials*)", "Read(//**/*secret*)",
+      "Read(//**/*_token)", "Read(//**/*.token)",
+      "Read(//**/.bash_history)", "Read(//**/.python_history)",
+      "Edit(//**/*credentials*)", "Edit(//**/*secret*)"
+    ]
+  },
+  "sandbox": {
+    "enabled": false,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "excludedCommands": ["sbatch *", "scancel *", "squeue *"],
+    "filesystem": {
+      "allowWrite": ["./audits"],
+      "denyRead": [
+        "/root/",
+        "~/.ssh/", "~/.gnupg/", "~/.secrets/",
+        "~/.aws/", "~/.kube/", "~/.config/gcloud/", "~/.azure/", "~/.docker/",
+        "~/.git-credentials", "~/.netrc", "~/.pgpass", "~/.my.cnf",
+        "~/.pypirc", "~/.npmrc", "~/.irods/", "~/.ncbi/",
+        "~/.bash_history", "~/.python_history",
+        "~/.claude/.credentials.json"
+      ]
+    },
+    "network": {
+      "allowedDomains": []
+    }
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Read|Grep|Glob|Edit|Write|NotebookEdit|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/log-action.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

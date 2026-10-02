@@ -1,0 +1,245 @@
+# lab-storage-audit classification rules. Edit freely; no code change needed.
+#
+# [[filetype]]
+#   name     : label shown in the report
+#   category : raw | processed | reference | code-env | logs | archive |
+#              tabular | image | document | other
+#   ext      : lower-case extensions exactly as common.ext_of() computes them
+#              (compound for compressed files: "fastq.gz"; rotated logs "x.log.1" -> "log")
+#   names    : optional case-sensitive globs on the file name (SQLite GLOB);
+#              these override ext matches, e.g. PacBio "*.subreads.bam" is raw.
+# [[dirmarker]]
+#   files / dirs : a directory containing any of these (glob) entries is tagged.
+#
+# "raw" means primary instrument output that is usually expensive or impossible to
+# regenerate. The agent refines this using peeks and directory names (e.g. a
+# FASTQ under "trimmed/" is processed).
+
+schema = 1
+
+# ---------------------------------------------------------------- raw
+[[filetype]]
+name = "FASTQ reads"
+category = "raw"
+ext = ["fastq", "fq", "fastq.gz", "fq.gz", "fastq.bgz", "fq.bgz", "fastq.bz2", "fq.bz2",
+       "fastq.xz", "fq.xz", "fastq.zst", "fq.zst", "fastq.ora", "fastq.dsrc", "fastq.lz4"]
+
+[[filetype]]
+name = "Illumina BCL/CBCL base calls"
+category = "raw"
+ext = ["bcl", "bcl.gz", "cbcl", "bcl.bgzf", "locs", "clocs", "filter"]
+
+[[filetype]]
+name = "Nanopore raw signal"
+category = "raw"
+ext = ["pod5", "fast5", "blow5", "slow5"]
+
+[[filetype]]
+name = "PacBio subreads/raw BAM"
+category = "raw"
+ext = []
+names = ["*.subreads.bam", "*.scraps.bam", "*.hifi_reads.bam", "*.ccs.bam", "*.reads.bam"]
+
+[[filetype]]
+name = "SRA archive"
+category = "raw"
+ext = ["sra", "sralite"]
+
+[[filetype]]
+name = "Mass spectrometry raw"
+category = "raw"
+ext = ["raw", "wiff", "wiff2", "mzml", "mzxml", "mgf", "baf", "tdf", "tdf_bin"]
+
+[[filetype]]
+name = "Microscopy raw"
+category = "raw"
+ext = ["nd2", "czi", "lif", "lsm", "oib", "oif", "ims", "vsi", "ets", "scn", "svs", "ndpi", "zvi"]
+
+[[filetype]]
+name = "Cryo-EM / EM raw"
+category = "raw"
+ext = ["mrc", "mrcs", "eer", "dm4", "dm3", "ser"]
+
+[[filetype]]
+name = "Flow cytometry"
+category = "raw"
+ext = ["fcs"]
+
+# ---------------------------------------------------------------- processed
+[[filetype]]
+name = "Alignments (BAM/CRAM/SAM)"
+category = "processed"
+ext = ["bam", "cram", "sam", "sam.gz"]
+
+[[filetype]]
+name = "Alignment/variant indexes"
+category = "processed"
+ext = ["bai", "crai", "csi", "tbi", "pbi"]
+
+[[filetype]]
+name = "Variants (VCF/BCF)"
+category = "processed"
+ext = ["vcf", "vcf.gz", "vcf.bgz", "bcf", "gvcf", "gvcf.gz"]
+
+[[filetype]]
+name = "PLINK genotypes"
+category = "processed"
+ext = ["bim", "fam", "pgen", "pvar", "psam"]
+
+[[filetype]]
+name = "Genomic intervals/tracks"
+category = "processed"
+ext = ["bed", "bed.gz", "narrowpeak", "broadpeak", "bedgraph", "bdg", "bw", "bigwig", "bb",
+       "bigbed", "wig", "maf", "maf.gz", "psl", "paf", "paf.gz", "chain", "chain.gz"]
+
+[[filetype]]
+name = "Matrices / single-cell objects"
+category = "processed"
+ext = ["h5ad", "loom", "mtx", "mtx.gz", "h5", "hdf5", "rds", "rdata", "rda", "zarr", "npy", "npz",
+       "pkl", "pickle", "feather", "parquet", "arrow"]
+
+[[filetype]]
+name = "Phylogenetics / alignments"
+category = "processed"
+ext = ["nwk", "newick", "tre", "tree", "treefile", "phy", "phylip", "nex", "nexus", "aln",
+       "sto", "stockholm", "msa", "trees"]
+
+[[filetype]]
+name = "Amplicon / OTU outputs"
+category = "processed"
+ext = ["qza", "qzv", "biom", "uc"]
+
+# ---------------------------------------------------------------- reference
+[[filetype]]
+name = "Taxonomy / BLAST databases"
+category = "reference"
+ext = ["accession2taxid", "accession2taxid.gz", "dmp", "btd", "bti", "nos", "nog", "njs",
+       "prt"]
+
+[[filetype]]
+name = "Sequence (FASTA)"
+category = "reference"
+ext = ["fa", "fasta", "fna", "faa", "ffn", "frn", "fas", "fa.gz", "fasta.gz", "fna.gz",
+       "faa.gz", "fas.gz", "2bit", "fa.bgz", "fa.bz2"]
+
+[[filetype]]
+name = "Annotation (GTF/GFF/GenBank)"
+category = "reference"
+ext = ["gtf", "gff", "gff3", "gtf.gz", "gff.gz", "gff3.gz", "gb", "gbk", "gbff", "gbff.gz",
+       "embl"]
+
+[[filetype]]
+name = "Aligner/sequence indexes"
+category = "reference"
+ext = ["fai", "dict", "bt2", "bt2l", "ebwt", "amb", "ann", "bwt", "pac", "sa", "mmi", "ht2",
+       "gzi", "sti", "k2d", "nhr", "nin", "nsq", "phr", "pin", "psq", "ndb", "not", "ntf",
+       "nto", "pdb", "pot", "ptf", "pto", "dmnd"]
+
+# ---------------------------------------------------------------- code / environments
+[[filetype]]
+name = "Code / scripts / notebooks"
+category = "code-env"
+ext = ["py", "r", "rmd", "qmd", "ipynb", "sh", "bash", "zsh", "pl", "pm", "jl", "c", "cc",
+       "cpp", "h", "hpp", "java", "scala", "go", "rs", "js", "ts", "m", "smk", "nf", "wdl",
+       "cwl", "sbatch", "slurm", "awk", "sed", "sql", "f90", "f", "cu", "mk", "cmake"]
+
+[[filetype]]
+name = "Snakefile/Makefile/Dockerfile"
+category = "code-env"
+ext = []
+names = ["Snakefile", "Makefile", "Dockerfile", "*.def", "Singularity"]
+
+[[filetype]]
+name = "Software builds / libraries"
+category = "code-env"
+ext = ["so", "a", "o", "pyc", "pyo", "whl", "jar", "class", "dll", "dylib", "egg", "mod"]
+
+[[filetype]]
+name = "Container images"
+category = "code-env"
+ext = ["sif", "simg", "img", "squashfs", "sqsh"]
+
+[[filetype]]
+name = "Config"
+category = "code-env"
+ext = ["yaml", "yml", "toml", "ini", "cfg", "conf", "config", "lock"]
+
+# ---------------------------------------------------------------- logs
+[[filetype]]
+name = "Logs / job output"
+category = "logs"
+ext = ["log", "out", "err", "stdout", "stderr", "log.gz"]
+names = ["slurm-*.out", "slurm-*.err", "nohup.out"]
+
+[[filetype]]
+name = "Nextflow task files"
+category = "logs"
+ext = []
+names = [".command.*", ".exitcode"]
+
+# ---------------------------------------------------------------- archives
+[[filetype]]
+name = "Archives"
+category = "archive"
+ext = ["tar", "tar.gz", "tgz", "tar.bz2", "tbz2", "tar.xz", "txz", "tar.zst", "zip", "7z",
+       "rar", "gz", "bz2", "xz", "zst", "dar"]
+
+# ---------------------------------------------------------------- general
+[[filetype]]
+name = "Tables / text data"
+category = "tabular"
+ext = ["tsv", "csv", "txt", "tab", "tsv.gz", "csv.gz", "txt.gz", "xlsx", "xls", "json",
+       "json.gz", "jsonl", "xml", "dat", "tab.gz", "counts", "sqlite", "db", "sqlite3"]
+
+[[filetype]]
+name = "Images / figures"
+category = "image"
+ext = ["png", "jpg", "jpeg", "tif", "tiff", "svg", "gif", "bmp", "eps", "webp", "heic"]
+
+[[filetype]]
+name = "Documents"
+category = "document"
+ext = ["pdf", "doc", "docx", "ppt", "pptx", "md", "html", "htm", "rtf", "odt", "tex", "bib",
+       "key", "pages", "numbers"]
+
+# ---------------------------------------------------------------- directory markers
+[[dirmarker]]
+name = "Illumina run folder"
+category = "raw"
+files = ["RunInfo.xml", "RTAComplete.txt", "CopyComplete.txt", "RunParameters.xml"]
+
+[[dirmarker]]
+name = "Nanopore run folder"
+category = "raw"
+files = ["sequencing_summary*.txt", "final_summary*.txt"]
+
+[[dirmarker]]
+name = "10x Cell Ranger output"
+category = "processed"
+files = ["web_summary.html", "metrics_summary.csv"]
+
+[[dirmarker]]
+name = "Conda environment"
+category = "code-env"
+dirs = ["conda-meta"]
+
+[[dirmarker]]
+name = "Python virtualenv"
+category = "code-env"
+files = ["pyvenv.cfg"]
+
+[[dirmarker]]
+name = "Git repository"
+category = "code-env"
+dirs = [".git"]
+
+[[dirmarker]]
+name = "Snakemake working dir"
+category = "code-env"
+dirs = [".snakemake"]
+
+[[dirmarker]]
+name = "Nextflow launch dir"
+category = "code-env"
+dirs = [".nextflow"]
+files = [".nextflow.log"]

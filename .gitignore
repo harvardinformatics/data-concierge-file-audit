@@ -1,0 +1,19 @@
+# Audit outputs: contain lab paths/metadata; never commit
+audits/*
+!audits/.gitkeep
+
+# Reference-only material (relevant parts copied to docs/cluster-reference.md)
+agent-guards/
+
+# Personal/per-run Claude Code settings (target Read allow is added here per run)
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# SLURM logs that escaped audits/<run>/slurm/
+slurm-*.out
+slurm-*.err
