@@ -143,6 +143,35 @@ def test_classify(db):
     assert db.execute("SELECT category FROM ext_stats WHERE ext='bin'").fetchone() == ("unknown",)
 
 
+def test_rules_names_and_markers(tmp_path, capsys):
+    t = tmp_path / "t"
+    files = {"run/hifi_reads/m84_s1.hifi_reads.bc1018.bam": "raw",
+             "run/fail_reads/m84_s1.fail_reads.unassigned.bam": "raw",
+             "run/hifi_reads/m84_s1.hifi_reads.bc1018.bam.pbi": "processed",
+             "aln/birds.hal": "processed", "aln/birds.hal.bak": "processed",
+             "graph/pan.gfa": "processed", "graph/pan.og": "processed",
+             "kmers/reads.jf": "processed", "cov/s1.d4": "processed",
+             "ref/genome.fa.masked": "reference", "xtal/refl.mtz": "processed",
+             "tax/nucl_gb.accession2taxid.gz": "reference"}
+    for rel in files:
+        (t / rel).parent.mkdir(parents=True, exist_ok=True)
+        (t / rel).write_text("x\n")
+    (t / "run" / "pb_formats").mkdir()
+    audits = tmp_path / "audits"
+    plan.main([str(t), "--audits-dir", str(audits), "--name", "r"])
+    run_dir = str(audits / "r")
+    scan.run_task(run_dir)
+    _post(run_dir, stages=["merge", "classify"])
+    assert "rules:" not in capsys.readouterr().err       # every rule can match
+    con = sqlite3.connect(os.path.join(run_dir, "audit.sqlite"))
+    got = {d + "/" + n: c for d, n, c in con.execute(
+        "SELECT f.dir, f.name, c.category FROM files f JOIN file_class c ON c.id = f.id")}
+    markers = con.execute("SELECT path, marker FROM dir_markers").fetchall()
+    con.close()
+    assert got == files
+    assert ("run", "PacBio run folder") in markers
+
+
 def test_confirm_full_hash(lab, tmp_path):
     run_dir = _plan(lab, tmp_path)
     scan.run_task(run_dir)

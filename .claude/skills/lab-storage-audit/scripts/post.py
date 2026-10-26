@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Post-process a finished scan into <run>/audit.sqlite.
 
-Stages (default: all, in this order):
+Stages (default for the run's mode, in this order):
   merge     shards/*.tsv.gz -> tables dirs, files, users   (fails if any shard lacks .done)
   dupes     file-level duplicates, hardlinks, parent-dir overlap   (reads file slices)
   rollup    recursive dir totals + newest mtime + Merkle signature; exact dir duplicates
   classify  rules.toml -> type/ext stats, raw-data locations, dir markers
   peek      <= --max-peeks representative files, <= --peek-bytes each -> <run>/peeks.jsonl
   summarize capped aggregates for the report -> <run>/summary.json
+
+Defaults come from the run's mode (plan.py --mode; MODE_DEFAULTS below):
+  deep    all stages; dupes from 1 MiB
+  survey  no peek; dupes only for files >= 256 MiB (provisional threshold,
+          to calibrate from summary.size_histogram); no duplicate dir trees
+Explicit options override the mode's defaults.
 
 Writes <run>/post.DONE (stats JSON) or <run>/post.FAILED.
 --workdir builds the database on node-local disk and copies it back at the end
@@ -34,10 +40,17 @@ import common as C  # noqa: E402
 import dupes  # noqa: E402
 import peek  # noqa: E402
 import summary  # noqa: E402
-from scan import DIR_COLS, FILE_COLS, load_shards  # noqa: E402
+from scan import DIR_COLS, FILE_COLS, expand_shards  # noqa: E402
 
 STAGES = ("merge", "dupes", "rollup", "classify", "peek", "summarize")
 BATCH = 50_000
+MODE_DEFAULTS = {
+    "deep": {"stages": STAGES, "min_size": 1 << 20, "max_pair_dirs": 50, "tree_dups": True},
+    # survey hashes only big files, so small-file trees would match on names and sizes alone
+    "survey": {"stages": ("merge", "dupes", "rollup", "classify", "summarize"),
+               "min_size": 256 << 20, "max_pair_dirs": 20, "tree_dups": False},
+}
+DB_PER_GZ = 24          # audit.sqlite measured at 16-21x the gzipped shard TSVs; margin on top
 
 
 def _db_text(s: str):
@@ -67,10 +80,10 @@ def _depth(rel: str) -> int:
 SCHEMA = """
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE dirs(
-  path TEXT PRIMARY KEY, path_raw BLOB, parent TEXT, name TEXT, depth INT, shard INT,
+  path TEXT PRIMARY KEY, path_raw BLOB, parent TEXT, name TEXT, depth INT, shard TEXT,
   status TEXT, uid INT, gid INT, mode TEXT, mtime INT,
   n_entries INT, n_files INT, n_subdirs INT, bytes_direct INT,
-  bytes_total INT, files_total INT, dirs_total INT, newest_mtime INT,
+  bytes_total INT, files_total INT, dirs_total INT, newest_mtime INT, activity_mtime INT,
   problem_dirs_below INT, complete INT, sig TEXT);
 CREATE TABLE files(
   id INTEGER PRIMARY KEY, dir TEXT, dir_raw BLOB, name TEXT, name_raw BLOB, ext TEXT,
@@ -80,19 +93,33 @@ CREATE TABLE users(uid INTEGER PRIMARY KEY, name TEXT, in_target_group INT);
 """
 
 
-def unfinished_shards(run_dir: str) -> list[int]:
-    return [sid for sid, _, _ in load_shards(run_dir)
+def unfinished_shards(run_dir: str) -> list[str]:
+    return [sid for sid, _, _ in expand_shards(run_dir)
             if not os.path.exists(os.path.join(run_dir, "shards", f"{sid}.done"))]
 
 
+def check_space(run_dir: str, work: str) -> dict:
+    """Refuse to merge when the DB (about DB_PER_GZ x the shard TSVs) won't fit."""
+    sdir = os.path.join(run_dir, "shards")
+    gz = sum(e.stat().st_size for e in os.scandir(sdir) if e.name.endswith(".tsv.gz"))
+    need = gz * DB_PER_GZ
+    out = {"shard_gz_bytes": gz, "db_estimate_bytes": need}
+    for where in {os.path.dirname(work), run_dir}:
+        free = shutil.disk_usage(where).free
+        if free < need:
+            raise RuntimeError(f"not enough space in {where}: ~{_h(need)} needed for "
+                               f"audit.sqlite, {_h(free)} free")
+    return out
+
+
 def merge(db: sqlite3.Connection, run_dir: str, run: dict) -> dict:
-    shards = load_shards(run_dir)
+    shards = expand_shards(run_dir)
     cur = db.cursor()
     cur.executescript(SCHEMA)
     cur.executemany("INSERT INTO meta VALUES (?,?)",
                     [(k, json.dumps(v)) for k, v in run.items()])
     n_files = n_dirs = 0
-    for sid, _mode, _root in shards:
+    for sid, _mode, _roots in shards:
         with C.open_tsv_gz_read(os.path.join(run_dir, "shards", f"{sid}.dirs.tsv.gz")) as fh:
             assert next(fh).rstrip("\n").split("\t") == DIR_COLS
             rows = []
@@ -163,8 +190,9 @@ _FILE_INSERT = """INSERT INTO files(dir, dir_raw, name, name_raw, ext, kind, siz
 
 # -------------------------------------------------------------------- rollup
 
-def rollup(db: sqlite3.Connection, min_dir_bytes: int) -> dict:
-    """Bottom-up totals and Merkle signatures; exact duplicate directory trees.
+def rollup(db: sqlite3.Connection, min_dir_bytes: int, tree_dups: bool = True) -> dict:
+    """Bottom-up totals and Merkle signatures; exact duplicate directory trees
+    (only with tree_dups).
 
     A dir's signature covers its entries' names, kinds and sizes, the partial
     hash of each file that was hashed by the dupes stage, symlink targets, and
@@ -207,6 +235,11 @@ def rollup(db: sqlite3.Connection, min_dir_bytes: int) -> dict:
     if cur_dir is not None:
         close(cur_dir, entries, nf, nb, newest)
 
+    # newest_mtime is the newest *file* below (when the data last changed). activity_mtime
+    # also counts dir mtimes, which move whenever an entry is added, renamed or removed
+    # (when anyone last touched the tree). A reorganisation moves only the second.
+    if "activity_mtime" not in {r[1] for r in cur.execute("PRAGMA table_info(dirs)")}:
+        cur.execute("ALTER TABLE dirs ADD COLUMN activity_mtime INT")   # DBs from before 10-09
     dirs = cur.execute("SELECT path, parent, name, depth, status, mtime FROM dirs "
                        "ORDER BY depth DESC").fetchall()
     kids: dict[str, list] = {}
@@ -214,20 +247,21 @@ def rollup(db: sqlite3.Connection, min_dir_bytes: int) -> dict:
     empty = hashlib.blake2b(b"", digest_size=16).digest()
     for path, parent, name, _depth_, status, mtime in dirs:
         dig, nf, nb, newest = own.get(path, (empty, 0, 0, 0))
+        active = max(newest, mtime or 0)
         ok = status == "ok"
         problems = 0 if ok or status == "excluded" else 1
         n_sub = 0
         child_parts = []
         complete = ok
-        for cname, csig, cf, cb, cn, cnd, cprob, ccomplete in kids.pop(path, []):
+        for cname, csig, cf, cb, cn, ca, cnd, cprob, ccomplete in kids.pop(path, []):
             nf += cf
             nb += cb
             newest = max(newest, cn)
+            active = max(active, ca)
             n_sub += 1 + cnd
             problems += cprob
             complete = complete and ccomplete
             child_parts.append((cname, csig))
-        newest = max(newest, mtime or 0)
         sig = None
         if complete:
             h = hashlib.blake2b(dig, digest_size=16)
@@ -235,18 +269,22 @@ def rollup(db: sqlite3.Connection, min_dir_bytes: int) -> dict:
                 h.update(repr(("d", cname)).encode("utf-8", "surrogateescape"))
                 h.update(csig)
             sig = h.digest()
-        updates.append((nb, nf, n_sub, newest, problems, int(complete),
+        updates.append((nb, nf, n_sub, newest, active, problems, int(complete),
                         sig.hex() if sig else None, path))
         if parent is not None:
             kids.setdefault(parent, []).append(
-                (name, sig or b"", nf, nb, newest, n_sub, problems, complete))
+                (name, sig or b"", nf, nb, newest, active, n_sub, problems, complete))
     cur.executemany("""UPDATE dirs SET bytes_total=?, files_total=?, dirs_total=?,
-                       newest_mtime=?, problem_dirs_below=?, complete=?, sig=? WHERE path=?""",
+                       newest_mtime=?, activity_mtime=?, problem_dirs_below=?, complete=?,
+                       sig=? WHERE path=?""",
                     updates)
     cur.execute("CREATE INDEX IF NOT EXISTS dirs_sig ON dirs(sig)")
 
     # exact duplicate trees; keep only maximal ones (parent not itself duplicated)
     cur.executescript("DROP TABLE IF EXISTS dir_dup_groups; DROP TABLE IF EXISTS dir_dup_members;")
+    if not tree_dups:
+        db.commit()
+        return {"dirs": len(dirs), "tree_dups": False, "used_hashes": has_hashes}
     cur.execute("""CREATE TEMP TABLE dupsig AS
         SELECT sig, COUNT(*) AS n, MAX(bytes_total) AS bytes, MAX(files_total) AS files
         FROM dirs WHERE sig IS NOT NULL AND files_total > 0 AND bytes_total >= ?
@@ -269,12 +307,7 @@ def rollup(db: sqlite3.Connection, min_dir_bytes: int) -> dict:
 
 # ---------------------------------------------------------------------- show
 
-def _h(n) -> str:
-    n = float(n or 0)
-    for u in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
-        if n < 1024 or u == "PiB":
-            return f"{n:.1f} {u}" if u != "B" else f"{int(n)} B"
-        n /= 1024
+_h = C.human_bytes
 
 
 def show(db: sqlite3.Connection, limit: int = 10) -> None:
@@ -333,12 +366,17 @@ def show(db: sqlite3.Connection, limit: int = 10) -> None:
 
 # ---------------------------------------------------------------------- main
 
-def run_post(run_dir: str, stages=STAGES, min_size=1 << 20, chunk=1 << 20,
+def run_post(run_dir: str, stages=None, min_size=None, chunk=1 << 20,
              confirm=False, workers=1, workdir=None, min_dir_bytes=1 << 20,
              rules_path=None, max_peeks=300, peek_bytes=64 << 10) -> dict:
+    """stages=None / min_size=None take the run mode's defaults (MODE_DEFAULTS)."""
     run_dir = os.path.realpath(run_dir)
     run = C.load_run(run_dir)
     C.check_run_dir_safe(run_dir, run["target"], run["excludes"])
+    mode = run.get("mode", "deep")
+    defaults = MODE_DEFAULTS[mode]
+    stages = defaults["stages"] if stages is None else stages
+    min_size = defaults["min_size"] if min_size is None else min_size
     C.clear_sentinel(run_dir, "post.FAILED")
     C.clear_sentinel(run_dir, "post.DONE")
     final = C.out_path(run_dir, "audit.sqlite")
@@ -362,11 +400,19 @@ def run_post(run_dir: str, stages=STAGES, min_size=1 << 20, chunk=1 << 20,
             shutil.copyfile(final, work)
 
     t0 = time.monotonic()
+    stats: dict = {"mode": mode, "stages": list(stages)}
+    if "merge" in stages:
+        stats["space"] = check_space(run_dir, work)
     db = sqlite3.connect(work)
     db.execute("PRAGMA journal_mode=OFF")
     db.execute("PRAGMA synchronous=OFF")
-    db.execute("PRAGMA temp_store=MEMORY")
-    stats: dict = {"stages": list(stages)}
+    db.execute("PRAGMA temp_store=FILE")         # sorts spill to SQLITE_TMPDIR, not RAM
+    db.execute("PRAGMA cache_size=-262144")      # 256 MiB page cache
+    if "merge" not in stages:                    # rerun of later stages: keep earlier stats
+        prev = db.execute("SELECT value FROM meta WHERE key='post_stats'").fetchone()
+        old = json.loads(prev[0]) if prev else {}
+        stats.update({k: v for k, v in old.items()
+                      if k == "space" or (k in STAGES and k not in stages)})
     for st in STAGES:
         if st not in stages:
             continue
@@ -375,9 +421,10 @@ def run_post(run_dir: str, stages=STAGES, min_size=1 << 20, chunk=1 << 20,
         if st == "merge":
             stats[st] = merge(db, run_dir, run)
         elif st == "dupes":
-            stats[st] = dupes.run(db, run["target"], min_size, chunk, confirm, workers)
+            stats[st] = dupes.run(db, run["target"], min_size, chunk, confirm, workers,
+                                  defaults["max_pair_dirs"])
         elif st == "rollup":
-            stats[st] = rollup(db, min_dir_bytes)
+            stats[st] = rollup(db, min_dir_bytes, defaults["tree_dups"])
         elif st == "classify":
             rules = classify.load_rules(rules_path or str(C.SCRIPTS_DIR / "rules.toml"))
             stats[st] = classify.run(db, rules)
@@ -402,9 +449,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True)
-    ap.add_argument("--stages", default=",".join(STAGES),
-                    help=f"comma list from {','.join(STAGES)}")
-    ap.add_argument("--min-size", default="1MiB", help="smallest file considered for dupes")
+    ap.add_argument("--stages", help=f"comma list from {','.join(STAGES)} "
+                    "(default: the run mode's stages)")
+    ap.add_argument("--min-size", help="smallest file considered for dupes "
+                    "(default: 1MiB deep, 256MiB survey)")
     ap.add_argument("--chunk", default="1MiB", help="partial-hash slice size (x3)")
     ap.add_argument("--min-dir-bytes", default="1MiB", help="smallest dir tree reported as dup")
     ap.add_argument("--confirm", action="store_true", help="full-hash duplicate candidates")
@@ -421,12 +469,15 @@ def main(argv=None) -> int:
         db = sqlite3.connect(f"file:{C.out_path(run_dir, 'audit.sqlite')}?mode=ro", uri=True)
         show(db)
         return 0
-    stages = [s.strip() for s in args.stages.split(",") if s.strip()]
-    bad = [s for s in stages if s not in STAGES]
-    if bad:
-        C.die(f"unknown stage(s): {bad}")
+    stages = None
+    if args.stages:
+        stages = [s.strip() for s in args.stages.split(",") if s.strip()]
+        bad = [s for s in stages if s not in STAGES]
+        if bad:
+            C.die(f"unknown stage(s): {bad}")
+    min_size = C.parse_size(args.min_size) if args.min_size else None
     try:
-        stats = run_post(run_dir, stages, C.parse_size(args.min_size), C.parse_size(args.chunk),
+        stats = run_post(run_dir, stages, min_size, C.parse_size(args.chunk),
                          args.confirm, args.workers or C.default_workers(), args.workdir,
                          C.parse_size(args.min_dir_bytes), args.rules, args.max_peeks,
                          C.parse_size(args.peek_bytes))

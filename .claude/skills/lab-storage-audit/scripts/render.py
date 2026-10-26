@@ -8,12 +8,19 @@ because lab paths are full of them. Everything is HTML-escaped first (paths come
 from the target and are untrusted); links are kept only for http(s)/mailto
 and relative URLs. Inline CSS, light/dark theme, no external resources.
 
+Data tables are filled in by script, not written by the agent: a line
+`{{table:NAME}}` in report.md becomes a Markdown table built from summary.json,
+wrapped in `<!-- table:NAME -->` ... `<!-- /table -->`, and report.md is rewritten
+with it. A re-render regenerates every wrapped table, so the tables are identical
+for the same summary.json. Names: see TABLES.
+
   python3 render.py --run audits/<run>
 """
 from __future__ import annotations
 
 import argparse
 import html
+import json
 import os
 import re
 import sys
@@ -177,12 +184,12 @@ def to_html(md: str) -> tuple[str, str, list[tuple[str, str]]]:
                 j += 1
             out.append(_list(lines[i:j]))
             i = j
-        elif not ln.strip():
+        elif not ln.strip() or re.match(r"^<!--.*-->\s*$", ln):    # blank or table marks
             i += 1
         else:
             j = i + 1
             while j < len(lines) and lines[j].strip() and not re.match(
-                    r"^(#{1,6}\s|```|>|\||(-{3,}|\*{3,})\s*$)", lines[j]) and not _LIST.match(lines[j]):
+                    r"^(#{1,6}\s|```|>|\||<!--|(-{3,}|\*{3,})\s*$)", lines[j]) and not _LIST.match(lines[j]):
                 j += 1
             out.append("<p>" + inline(" ".join(x.strip() for x in lines[i:j])) + "</p>")
             i = j
@@ -199,6 +206,215 @@ def render(md: str) -> str:
             f"<body><main>{nav}{body}</main></body></html>\n")
 
 
+# ------------------------------------------------------------- tables from summary.json
+
+def _rows(t: dict) -> list[dict]:
+    return [dict(zip(t["cols"], r)) for r in t["rows"]]
+
+
+def _code(p) -> str:
+    """A path as inline code; paths are untrusted, so no backticks, pipes or newlines."""
+    p = re.sub(r"[\x00-\x1f\x7f]", "?", str(p)).replace("`", "'").replace("|", "\\|")
+    return f"`{p}`"
+
+
+def _n(x) -> str:
+    return "" if x is None else f"{x:,}"
+
+
+def _pct(part, whole) -> str:
+    if not whole:
+        return ""
+    x = 100 * (part or 0) / whole
+    return "<0.1%" if 0 < x < 0.1 else f"{x:.1f}%"
+
+
+def _md(head: list[str], body: list[list]) -> list[str]:
+    out = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+    out += ["| " + " | ".join("" if c is None else str(c) for c in r) + " |" for r in body]
+    return out
+
+
+def _showing(shown: int, total: int, what: str = "rows") -> list[str]:
+    return [f"Showing {shown:,} of {total:,} {what}."] if total > shown else []
+
+
+def _total(s: dict, key: str, table: dict) -> int:
+    return s.get("capped", {}).get(key, [0, len(table["rows"])])[1]
+
+
+def _content(cats, nb) -> str:
+    return ", ".join(f"{c} {_pct(b, nb)}" for c, b in cats or [] if nb)
+
+
+def _folder_rows(s: dict, rows: list[dict]) -> list[list]:
+    tb = s["totals"]["bytes"]
+    out = []
+    for r in rows:
+        size = C.human_bytes(r["bytes"])
+        if r["status"] != "ok":
+            size += f" ({r['status']})"
+        out.append([_code(r["path"]), size, _pct(r["bytes"], tb), _n(r["files"]),
+                    _content(r["top_categories"], r["bytes"]), r["top_owner"] or "",
+                    r["newest"] or "", r["last_activity"] or ""])
+    return out
+
+
+_FOLDER_HEAD = ["Folder", "Size", "Share", "Files", "Main content", "Main owner",
+                "Newest file", "Last activity"]
+
+
+def t_areas_top(s):
+    rows = sorted((r for r in _rows(s["folders"]) if r["level"] == 1),
+                  key=lambda r: (-r["bytes"], r["path"]))
+    body = _folder_rows(s, rows)
+    if o := s.get("folders_other"):
+        body.append([f"other ({o['n']:,} folders)", C.human_bytes(o["bytes"]),
+                     _pct(o["bytes"], s["totals"]["bytes"]), _n(o["files"]), "", "", "", ""])
+    return _md(_FOLDER_HEAD, body)
+
+
+def t_areas_detail(s, limit=15):
+    rows = sorted((r for r in _rows(s["folders"]) if r["level"] == 2),
+                  key=lambda r: (-r["bytes"], r["path"]))
+    total = s.get("folder_levels", {}).get("2", len(rows))
+    return _md(_FOLDER_HEAD, _folder_rows(s, rows[:limit])) + _showing(
+        min(limit, len(rows)), total, "folders at this level")
+
+
+def t_users(s, limit=15):
+    u = s["users"]
+    body = [[r["user"] or f"(deleted, uid {r['uid']})", "yes" if r["in_group"] else "no",
+             C.human_bytes(r["bytes"]), _n(r["files"]), r["newest"] or ""]
+            for r in _rows(u["table"])[:limit]]
+    return _md(["User", "In group", "Size", "Files", "Newest file"], body) + _showing(
+        len(body), u["n"], "users")
+
+
+def t_big_duplicates(s, limit=10):
+    t = s["duplicates"]["top_groups"]
+    body = [[C.human_bytes(r["size"]), _n(r["copies_outside_pipeline_work"]),
+             C.human_bytes(r["reclaimable_outside_pipeline_work"]),
+             _code(r["paths"][0]) if r["paths"] else ""] for r in _rows(t)[:limit]]
+    return _md(["Size each", "Copies", "Reclaimable", "Example path"], body) + _showing(
+        len(body), _total(s, "duplicates.top_groups", t), "duplicate groups")
+
+
+def t_dir_overlap(s, limit=10):
+    t = s["duplicates"]["dir_overlap"]
+    body = [[_code(r["dir_a"]), _code(r["dir_b"]), C.human_bytes(r["shared_bytes"]),
+             _n(r["shared_files"])] for r in _rows(t)[:limit]]
+    return _md(["Folder A", "Folder B", "Shared", "Files"], body) + _showing(
+        len(body), _total(s, "duplicates.dir_overlap", t), "folder pairs")
+
+
+def t_dir_trees(s, limit=10):
+    t = s["duplicates"]["dir_trees"]
+    body = [[_n(r["copies"]), C.human_bytes(r["bytes_each"]), _n(r["files_each"]),
+             C.human_bytes(r["reclaimable"]), ", ".join(_code(p) for p in r["paths"][:2])]
+            for r in _rows(t["top"])[:limit]]
+    return _md(["Copies", "Size each", "Files each", "Reclaimable", "Example paths"],
+               body) + _showing(len(body), t["n"], "duplicate trees")
+
+
+def t_unreadable(s, limit=15):
+    p = s["problem_dirs"]
+    body = [[_code(r["parent"]), r["status"], _n(r["n"]),
+             ", ".join(_code(e) for e in r["examples"]), ", ".join(r["owners"]),
+             _n(r["owners_outside_group"]), r["newest"] or ""]
+            for r in _rows(p["groups"])[:limit]]
+    return _md(["Parent", "Status", "Count", "Examples", "Owners", "Owners outside group",
+                "Newest"], body) + _showing(len(body), p["n_groups"], "groups")
+
+
+def t_raw_data(s, limit=10):
+    r_ = s["raw_locations"]
+    body = [[_code(r["path"]), r["ftype"], _n(r["dirs"]), _n(r["files"]),
+             C.human_bytes(r["bytes"]), r["newest"] or ""] for r in _rows(r_["top"])[:limit]]
+    return _md(["Folder", "Type", "Dirs", "Files", "Size", "Newest"], body) + _showing(
+        len(body), _total(s, "raw_locations.top", r_["top"]), "locations")
+
+
+def t_unknown_types(s, limit=10):
+    u = s["unknown_exts"]
+    body = [[_code(r["ext"]) if r["ext"] else "(none)", _n(r["files"]),
+             C.human_bytes(r["bytes"]), _n(r["dirs"]), r["newest"] or ""]
+            for r in _rows(u["top"])[:limit]]
+    return _md(["Extension", "Files", "Size", "Dirs", "Newest"], body) + _showing(
+        len(body), u["n"], "unknown extensions")
+
+
+def t_pipeline_workdirs(s, limit=10):
+    w = s["pipeline_workdirs"]
+    body = [[_code(r["path"]), r["marker"], C.human_bytes(r["bytes"]), _n(r["files"]),
+             r["newest"] or ""] for r in _rows(w["top"])[:limit]]
+    return _md(["Folder", "Kind", "Size", "Files", "Newest"], body) + _showing(
+        len(body), w["n"], "work dirs")
+
+
+def t_age(s):
+    return _md(["Year", "Files", "Size"], [[r["year"] or "(none)", _n(r["files"]),
+                                           C.human_bytes(r["bytes"])]
+                                          for r in _rows(s["age_by_year"])])
+
+
+def t_size_histogram(s):
+    def label(b):
+        return "0 bytes" if b == 0 else f"from {b:,} bytes"
+    return _md(["File size (decimal)", "Files", "Size"], [
+        [label(r["from_bytes"]), _n(r["files"]), C.human_bytes(r["bytes"])]
+        for r in _rows(s["size_histogram"])])
+
+
+def t_by_category(s):
+    tb = s["totals"]["bytes"]
+    return _md(["Category", "Files", "Size", "Share"], [
+        [r["category"], _n(r["files"]), C.human_bytes(r["bytes"]), _pct(r["bytes"], tb)]
+        for r in _rows(s["by_category"])])
+
+
+TABLES = {name[2:]: fn for name, fn in globals().items() if name.startswith("t_")}
+# the tables each template asks for; a report missing one gets a warning
+REQUIRED = {
+    "survey": ("areas_top", "areas_detail", "users", "age", "raw_data", "unknown_types",
+               "big_duplicates", "dir_overlap", "unreadable", "size_histogram", "by_category"),
+    "deep": ("areas_top", "areas_detail", "users", "raw_data", "big_duplicates", "dir_trees",
+             "dir_overlap", "pipeline_workdirs", "unreadable", "age", "by_category",
+             "unknown_types"),
+}
+_MARK = re.compile(r"^\{\{table:([a-z_]+)\}\}\s*$")
+_REGION = re.compile(r"^<!-- table:([a-z_]+) -->$")
+
+
+def expand(md: str, summary: dict) -> tuple[str, list[str]]:
+    """Fill every {{table:NAME}} marker and regenerate every wrapped table.
+    Returns (new markdown, names used). Unknown names raise ValueError."""
+    out, used = [], []
+    lines = md.splitlines()
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        m = _MARK.match(ln) or _REGION.match(ln)
+        if not m:
+            out.append(ln)
+            i += 1
+            continue
+        name = m.group(1)
+        if name not in TABLES:
+            raise ValueError(f"unknown table {name!r}; valid: {', '.join(sorted(TABLES))}")
+        if _REGION.match(ln):                       # skip the old table up to its end mark
+            while i < len(lines) and lines[i] != "<!-- /table -->":
+                i += 1
+        try:
+            table = TABLES[name](summary)
+        except KeyError as ex:                      # section absent from this summary
+            table = [f"Not available: `summary.json` has no {ex}."]
+        out += [f"<!-- table:{name} -->", *table, "<!-- /table -->"]
+        used.append(name)
+        i += 1
+    return "\n".join(out) + "\n", used
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -206,7 +422,20 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     src = C.out_path(args.run, "report.md")
     with open(src, encoding="utf-8") as fh:
-        page = render(fh.read())
+        md = fh.read()
+    sj = C.out_path(args.run, "summary.json")
+    if os.path.exists(sj):
+        with open(sj, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        md, used = expand(md, summary)
+        C.log(f"filled tables: {', '.join(used) or 'none'}")
+        missing = [n for n in REQUIRED.get(summary.get("mode", "deep"), ()) if n not in used]
+        if missing:
+            C.log(f"WARNING: report.md has no {{{{table:...}}}} line for: {', '.join(missing)}")
+        with open(src + ".tmp", "w", encoding="utf-8") as fh:
+            fh.write(md)
+        os.replace(src + ".tmp", src)
+    page = render(md)
     dst = C.out_path(args.run, "report.html")
     with open(dst + ".tmp", "w", encoding="utf-8") as fh:
         fh.write(page)

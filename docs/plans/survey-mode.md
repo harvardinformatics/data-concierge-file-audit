@@ -1,6 +1,6 @@
 # Plan: two audit modes (quick `survey` of a whole lab, then `deep` per scope)
 
-> **Status: deferred** (2026-10-02). The design is approved; implement later. Linked from `docs/plan.md` Open items.
+> **Status: implemented, cluster verification pending** (2026-10-05). Code and unit tests are done (Verification step 1). Steps 2–6 need compute nodes; all partitions were down for maintenance. Implementation choices are in `docs/decisions.md` (2026-10-05). Linked from `docs/plan.md` Open items.
 
 ## Context
 - **The current pipeline suits project and user dirs.** On a large project dir (multi-TiB, millions of files) it ran end to end in under half an hour, but the report phase used most of the agent tokens.

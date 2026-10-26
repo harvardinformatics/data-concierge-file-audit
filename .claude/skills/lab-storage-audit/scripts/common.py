@@ -167,12 +167,25 @@ def load_run(run_dir: str) -> dict:
     return run
 
 
-def write_json_atomic(path: str, obj) -> None:
+def human_bytes(n) -> str:
+    """Binary units, one decimal: 6.2 GiB."""
+    n = float(n or 0)
+    for u in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if n < 1024 or u == "PiB":
+            return f"{n:.1f} {u}" if u != "B" else f"{int(n)} B"
+        n /= 1024
+
+
+def write_json_atomic(path: str, obj, dumps=None) -> int:
+    """Write JSON atomically, indented unless a dumps(obj) -> str is given.
+    Returns bytes written."""
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
-        json.dump(obj, fh, indent=2, sort_keys=True)
+        fh.write(dumps(obj) if dumps else json.dumps(obj, indent=2, sort_keys=True))
         fh.write("\n")
+        n = fh.tell()
     os.replace(tmp, path)
+    return n
 
 
 def write_sentinel(run_dir: str, name: str, info: dict) -> None:

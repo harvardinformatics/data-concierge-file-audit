@@ -3,6 +3,8 @@ import gzip
 import json
 import os
 
+import pytest
+
 import plan
 import post
 import render
@@ -28,6 +30,16 @@ def _peeks(run_dir):
         return [json.loads(x) for x in fh]
 
 
+def _summary(run_dir):
+    with open(os.path.join(run_dir, "summary.json")) as fh:
+        return json.load(fh)
+
+
+def rows(table):
+    """summary.json {cols, rows} table -> list of dicts."""
+    return [dict(zip(table["cols"], r)) for r in table["rows"]]
+
+
 def test_peek_and_summary_on_lab(lab, tmp_path):
     before = snapshot(lab)
     run_dir = _run(lab, tmp_path, "--exclude", "excluded")
@@ -42,19 +54,19 @@ def test_peek_and_summary_on_lab(lab, tmp_path):
         assert set(p) >= {"path", "size", "ftype", "magic", "format"}
         assert len(p.get("lines", [])) <= 8 and all(len(x) <= 160 for x in p.get("lines", []))
 
-    with open(os.path.join(run_dir, "summary.json")) as fh:
-        s = json.load(fh)
-    assert s["schema_version"] == 1
+    s = _summary(run_dir)
+    assert s["schema_version"] == 2 and s["mode"] == "deep"
     assert s["peeks"]["n"] == len(peeks)
     d = s["duplicates"]
     assert d["reclaimable_bytes"] == 3 * 64 * KB
-    assert ["userA/proj/data", "userB/copy"] in [t["paths"] for t in d["dir_trees"]]
+    assert ["userA/proj/data", "userB/copy"] in [t["paths"] for t in rows(d["dir_trees"]["top"])]
     if not IS_ROOT:
-        assert {"path": "userC/private", "status": "unreadable"}.items() <= next(
-            x for x in s["problem_dirs"] if x["path"] == "userC/private").items()
-    top = {f["path"]: f for f in s["folders"]}
+        assert {"parent": "userC", "status": "unreadable", "n": 1,
+                "examples": ["private"]}.items() <= next(
+            g for g in rows(s["problem_dirs"]["groups"]) if g["status"] == "unreadable").items()
+    top = {f["path"]: f for f in rows(s["folders"])}
     assert top["."]["bytes"] == s["totals"]["bytes"]
-    assert sum(b for _c, b in top["."]["by_category"]) == s["totals"]["bytes"]
+    assert top["."]["top_categories"][0] == ["raw", 6 * 64 * KB]
 
 
 def test_pipeline_work_is_not_a_duplicate(tmp_path):
@@ -70,18 +82,17 @@ def test_pipeline_work_is_not_a_duplicate(tmp_path):
     (t / "solo" / "x.fastq.gz").write_bytes((t / "run/work/cd" / ("e" * 30) / "x_1.fastq.gz").read_bytes())
     (t / "run" / ".nextflow").mkdir()
     run_dir = _run(t, tmp_path)
-    with open(os.path.join(run_dir, "summary.json")) as fh:
-        s = json.load(fh)
+    s = _summary(run_dir)
     d = s["duplicates"]
     assert d["file_groups"] == 2
     assert d["file_groups_outside_pipeline_work"] == 1
     assert d["reclaimable_bytes_outside_pipeline_work"] == 64 * KB
-    assert d["top_groups"][0]["paths"] == ["copy/s_R1.fastq.gz", "run/data_raw/s_R1.fastq.gz"]
-    assert [w["path"] for w in s["pipeline_workdirs"]] == ["run/work"]
-    folders = {f["path"]: f["pipeline_work"] for f in s["folders"]}
-    assert folders["run/work"] is True and folders["run/data_raw"] is False
-    assert all("work" not in r["dir"] for r in s["raw_locations"])
-    assert all("work" not in o["dir_a"] + o["dir_b"] for o in d["dir_overlap"])
+    assert rows(d["top_groups"])[0]["paths"] == ["copy/s_R1.fastq.gz", "run/data_raw/s_R1.fastq.gz"]
+    assert [w["path"] for w in rows(s["pipeline_workdirs"]["top"])] == ["run/work"]
+    folders = {f["path"]: f["pipeline_work"] for f in rows(s["folders"])}
+    assert folders["run/work"] == 1 and folders["run/data_raw"] == 0
+    assert all("work" not in r["path"] for r in rows(s["raw_locations"]["top"]))
+    assert all("work" not in o["dir_a"] + o["dir_b"] for o in rows(d["dir_overlap"]))
 
 
 def test_peek_cap(lab, tmp_path):
@@ -110,8 +121,7 @@ def test_peek_formats(tmp_path):
     assert by["x.h5"]["format"] == "hdf5" and "lines" not in by["x.h5"]
     assert by["NOTES.md"]["injection_suspect"] is True
     assert by["table.tsv"]["injection_suspect"] is False
-    with open(os.path.join(run_dir, "summary.json")) as fh:
-        assert json.load(fh)["peeks"]["injection_suspects"] == ["docs/NOTES.md"]
+    assert _summary(run_dir)["peeks"]["injection_suspects"] == ["docs/NOTES.md"]
 
 
 def test_render_escapes_and_structures():
@@ -146,3 +156,45 @@ Intro with **bold**, *italic*, data_raw_dir_name and <script>alert(1)</script>.
     assert "<ol><li>first</li></ol>" in out
     assert '<a href="https://example.org">ok</a>' in out and 'href="javascript' not in out
     assert "<blockquote><p>note</p></blockquote>" in out
+
+
+def test_render_fills_tables(lab, tmp_path, capsys):
+    """Every {{table:NAME}} marker is filled from summary.json, the same way every time."""
+    run_dir = _run(lab, tmp_path, "--exclude", "excluded")
+    names = sorted(render.TABLES)
+    md = "# Audit\n\n## Areas\n\n" + "\n\n".join(f"{{{{table:{n}}}}}" for n in names) + "\n"
+    with open(os.path.join(run_dir, "report.md"), "w") as fh:
+        fh.write(md)
+    assert render.main(["--run", run_dir]) == 0
+    assert "WARNING" not in capsys.readouterr().err           # every required table present
+    with open(os.path.join(run_dir, "report.md")) as fh:
+        filled = fh.read()
+    assert "{{table:" not in filled
+    assert all(f"<!-- table:{n} -->" in filled for n in names)
+    assert render.main(["--run", run_dir]) == 0             # re-render: identical
+    with open(os.path.join(run_dir, "report.md")) as fh:
+        assert fh.read() == filled
+    top = filled.split("<!-- table:areas_top -->")[1].split("<!-- /table -->")[0]
+    assert "`userA`" in top and "`userB`" in top and "Share" in top
+    with open(os.path.join(run_dir, "report.html")) as fh:
+        page = fh.read()
+    assert "<!--" not in page and page.count("<table>") == len(names)
+
+
+def test_render_table_details():
+    s = {"totals": {"bytes": 1000},
+         "unknown_exts": {"n": 30, "top": {"cols": ["ext", "files", "bytes", "dirs", "oldest",
+                                                     "newest"],
+                                            "rows": [[f"e{i}", 1, 10, 1, None, "2026-01-01"]
+                                                     for i in range(25)]}},
+         "folders": {"cols": ["path", "level", "status", "bytes", "files", "dirs", "newest",
+                              "last_activity", "problem_dirs_below", "pipeline_work",
+                              "top_categories", "top_owner"],
+                     "rows": [["a|b`c", 1, "unreadable", 0, 0, 0, None, None, 1, 0, [], None]]}}
+    out, used = render.expand("{{table:unknown_types}}\n{{table:areas_top}}\n", s)
+    assert used == ["unknown_types", "areas_top"]
+    assert "Showing 10 of 30 unknown extensions." in out
+    assert "`a\\|b'c`" in out and "0 B (unreadable)" in out     # untrusted path made safe
+    assert "Not available" in render.expand("{{table:users}}\n", s)[0]
+    with pytest.raises(ValueError, match="unknown table 'nope'"):
+        render.expand("{{table:nope}}\n", s)

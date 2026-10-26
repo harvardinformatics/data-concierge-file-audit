@@ -4,9 +4,12 @@ Picks representative files and reads at most `max_bytes` from the start of each,
 the way a person would open one file of each kind to see what it is:
   * one file (the largest) per (directory, type key); the key is the rules.toml
     ftype, or 'unknown:<ext>' for unmatched extensions;
-  * unknown keys first (resolving them is what peeks are for), then known keys,
-    each by total bytes; round-robin over keys so every type is sampled before
-    any type gets a second directory; at most `max_peeks` files in total.
+  * the budget is split: about UNKNOWN_SHARE for unknown keys (resolving them is
+    what peeks are for), the rest for known keys with raw, then processed, types
+    first (checking that "raw" really is raw); a share either side can't use
+    goes to the other; within each side, keys by total bytes, round-robin, so
+    every type is sampled before any type gets a second directory; at most
+    `max_peeks` files in total, unknown ones listed first.
 Sensitive files are never opened. Target files are opened only via common.open_ro.
 
 Writes <run>/peeks.jsonl and a `peeks` table. Raw bytes are never stored: only
@@ -31,6 +34,8 @@ import common as C
 
 MAX_LINES = 8
 LINE_CHARS = 160
+UNKNOWN_SHARE = 0.6
+_CAT_ORDER = {"raw": 0, "processed": 1}
 
 _SIGS = [  # (offset, bytes, format), checked on decompressed bytes
     (0, b"\x89HDF\r\n\x1a\n", "hdf5"), (0, b"%PDF", "pdf"), (0, b"\x89PNG", "png"),
@@ -148,28 +153,35 @@ def peek_file(path: bytes, max_bytes: int) -> dict:
     return out
 
 
+def _round_robin(by_key: dict, keys: list[str]) -> list[tuple[str, int]]:
+    """(key, file id) in round-robin order over `keys`, each key's dirs by bytes."""
+    lists = [(k, sorted(by_key[k], reverse=True)) for k in keys]
+    out, rnd = [], 0
+    while any(rnd < len(v) for _k, v in lists):
+        out += [(k, v[rnd][1]) for k, v in lists if rnd < len(v)]
+        rnd += 1
+    return out
+
+
 def select(db: sqlite3.Connection, max_peeks: int) -> list[tuple]:
     rows = db.execute("""
         SELECT CASE WHEN c.category = 'unknown' THEN 'unknown:' || f.ext ELSE c.ftype END AS k,
-               f.dir, f.id, MAX(f.size), SUM(f.size) AS b
+               c.category, f.dir, f.id, MAX(f.size), SUM(f.size) AS b
         FROM files f JOIN file_class c ON c.id = f.id
         WHERE f.kind = 'f' AND f.sensitive = 0 AND f.size > 0
         GROUP BY k, f.dir""").fetchall()
     by_key: dict[str, list] = defaultdict(list)
-    for k, _d, fid, _mx, b in rows:
+    cat: dict[str, str] = {}
+    for k, c, _d, fid, _mx, b in rows:
         by_key[k].append((b, fid))
-    keys = sorted(by_key, key=lambda k: (not k.startswith("unknown:"),
-                                         -sum(b for b, _ in by_key[k])))
-    for k in keys:
-        by_key[k].sort(reverse=True)
-    picked: list[tuple[str, int]] = []
-    rnd = 0
-    while len(picked) < max_peeks and any(rnd < len(by_key[k]) for k in keys):
-        for k in keys:
-            if rnd < len(by_key[k]) and len(picked) < max_peeks:
-                picked.append((k, by_key[k][rnd][1]))
-        rnd += 1
-    return picked
+        cat[k] = c
+    total = {k: sum(b for b, _ in v) for k, v in by_key.items()}
+    unknown = sorted((k for k in by_key if k.startswith("unknown:")), key=lambda k: -total[k])
+    known = sorted((k for k in by_key if not k.startswith("unknown:")),
+                   key=lambda k: (_CAT_ORDER.get(cat[k], 2), -total[k]))
+    u, kn = _round_robin(by_key, unknown), _round_robin(by_key, known)
+    n_u = min(len(u), max(round(max_peeks * UNKNOWN_SHARE), max_peeks - len(kn)))
+    return u[:n_u] + kn[:max_peeks - n_u]
 
 
 def run(db: sqlite3.Connection, run_dir: str, target: str, max_peeks: int,

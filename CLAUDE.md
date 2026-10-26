@@ -50,11 +50,11 @@ This project follows `~/.claude/CLAUDE.md` and the `cannoncluster` skill. Projec
 
 All under `.claude/skills/lab-storage-audit/scripts/`, and all take `--help`.
 - `common.py`: the safety contract (`open_ro`, `out_path`, `check_run_dir_safe`, sensitive-path patterns), TSV escaping, and `ext_of`.
-- `plan.py TARGET [--only REL] [--exclude P]`: bounded survey. Creates `audits/<run>/run.json` and `shards.tsv`, and updates `audits/.current-run`.
-- `scan.py --run R [--task-index I --num-tasks N --workers W]`: walks the shards assigned to it, writing `shards/<id>.{files,dirs}.tsv.gz` and `<id>.done`, then `scan.task<I>.DONE` or `.FAILED`.
-- `post.py --run R [--stages …] [--confirm] [--workdir D] [--show]`: produces `audit.sqlite` and `post.DONE` or `.FAILED`. `--show` prints a digest.
+- `plan.py TARGET [--mode survey|deep] [--only REL] [--exclude P]`: bounded listing. Creates `audits/<run>/run.json` (with the mode) and `shards.tsv`, and updates `audits/.current-run`. Plan: `docs/plans/survey-mode.md`.
+- `scan.py --run R [--task-index I --num-tasks N --workers W --split-files K]`: walks the shards assigned to it, writing `shards/<id>.{files,dirs}.tsv.gz` and `<id>.done`, then `scan.task<I>.DONE` or `.FAILED`. Big tree shards split into child shards `<id>.<i>`, listed in the parent's `.done`.
+- `post.py --run R [--stages …] [--confirm] [--workdir D] [--show]`: produces `audit.sqlite` and `post.DONE` or `.FAILED`. Stage and threshold defaults come from the run's mode (`MODE_DEFAULTS`). `--show` prints a digest.
   - `dupes.py`, `classify.py`, `peek.py` and `summary.py` are its stage modules. The last two write `peeks.jsonl` and `summary.json`.
 - `rules.toml`: file-type and raw-data rules. `classify.load_rules` warns on unmatchable or duplicate extensions.
 - `scan_array.sbatch`, `post.sbatch`: submit from the repo root. The caller passes the partition, resources and `-o`/`-e`. `post` depends on the scan with `afterany`.
-- `render.py --run R`: turns `report.md` into a self-contained `report.html`.
+- `render.py --run R`: fills the `{{table:NAME}}` data tables in `report.md` from `summary.json`, then writes a self-contained `report.html`.
 - `.claude/hooks/log-action.sh`: PostToolUse hook that writes to `audits/<run>/agent-actions.log`. The run is chosen by `audits/.current-run`.

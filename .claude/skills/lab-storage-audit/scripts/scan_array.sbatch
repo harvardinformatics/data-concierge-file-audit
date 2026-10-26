@@ -4,10 +4,11 @@
 #
 # Submit FROM THE REPO ROOT. Partition/resources/logs are passed by the caller
 # (limits per https://docs.rc.fas.harvard.edu/kb/running-jobs/#Slurm_Partitions):
-#   sbatch --parsable -p test -t 0-01:00 -c 4 --mem=4G --array=0-0 \
+#   sbatch --parsable -p <partition> -t <time> -c <cpus> --mem=<mem> --array=0-<N-1>%<K> \
 #     -o audits/<run>/slurm/%x-%A_%a.out -e audits/<run>/slurm/%x-%A_%a.err \
 #     .claude/skills/lab-storage-audit/scripts/scan_array.sbatch audits/<run>
-# Dev rule: <=3 jobs on `test` at once, array tasks included (use %N throttle).
+# Keep tasks x cpus <= 16 concurrent walkers (metadata-server load).
+# Dev rule: <=3 jobs at once, array tasks included (use the %K throttle).
 #SBATCH -J lsa-scan
 #SBATCH --open-mode=append
 set -euo pipefail
