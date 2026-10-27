@@ -26,7 +26,7 @@ The skill audits a lab directory **read-only** and produces a report that the PI
    - It reads `summary.json` and the peeks, much as an analyst would. It works out what the unknown file types are, whether "raw" really is raw, and which copies are pipeline scratch versus real duplicates.
    - It may run a few small read-only queries on the database.
    - It then writes `report.md` using the fixed sections in `references/report-template.md` (deep) or `references/survey-template.md` (survey).
-7. **Render and hand off.** `render.py` fills the report's data tables from `summary.json` (the agent writes only a `{{table:NAME}}` line for each), then turns `report.md` into a self-contained `report.html`. Claude tells you where the files are. You review them and decide what to send.
+7. **Render and hand off.** `render.py` fills the report's data tables and fixed sentences from `summary.json` (the agent writes only a `{{table:NAME}}` or `{{facts:NAME}}` line for each, plus the interpretation), then turns `report.md` into a self-contained `report.html`. Claude tells you where the files are. You review them and decide what to send.
 
 ## What it produces (all in `audits/<run>/`, never in the lab directory)
 
@@ -96,7 +96,7 @@ flowchart LR
 | ↳ `classify.py` | | `rules.toml` assigns each file a type and category (raw, processed, reference, …). Also produces raw-data locations and dir markers (Nextflow, git, conda, Illumina). | — |
 | ↳ `peek.py` | | Deep only. One file per (dir, type); ~60% of the budget for unknown types, the rest for known ones with raw first; ≤ 300 files, ≤ 64 KiB each. Records magic bytes, compression, format, features, ≤ 8 short lines, and an injection flag. | ≤ 300 × 64 KiB |
 | ↳ `summary.py` | | Capped, versioned aggregates (schema 2, compact `{cols, rows}` tables). Workflow scratch (`work/`, `.snakemake/`) is separated, so staging copies aren't counted as duplicates. Unreadable dirs are grouped by parent; credential-like names are split into inside software environments vs elsewhere; a file-size histogram calibrates the survey threshold. | — |
-| `render.py` | agent shell | Fills each `{{table:NAME}}` line in `report.md` with a fixed table from `summary.json` (rewriting `report.md`; re-renders regenerate them), then `report.md` → self-contained `report.html`. Escapes everything and keeps only safe links. | — |
+| `render.py` | agent shell | Fills each `{{table:NAME}}` line in `report.md` with a fixed table and each `{{facts:NAME}}` line with fixed sentences (totals, coverage, method) from `summary.json`, rewriting `report.md` (re-renders regenerate them). Lints survey prose (word budgets, numbers repeated from tables). Then `report.md` → self-contained `report.html`. Escapes everything and keeps only safe links. | — |
 | `log-action.sh` (hook) | every tool call | Appends each command and file read to `agent-actions.log`. | — |
 
 Full promises are in [SAFETY.md](../SAFETY.md). Design history is in [plan.md](plan.md) and [decisions.md](decisions.md).

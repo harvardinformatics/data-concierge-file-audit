@@ -10,6 +10,10 @@
 #              these override ext matches, e.g. PacBio "*.subreads.bam" is raw.
 # [[dirmarker]]
 #   files / dirs : a directory containing any of these (glob) entries is tagged.
+# [[hint]]
+#   ext    : extensions that stay unclassified ("unknown") but have a likely meaning
+#   likely : the report's "Likely" text for them; a guess, so keep it short and hedged.
+#            Once an extension is certain, give it a [[filetype]] rule instead.
 #
 # "raw" means primary instrument output that is usually expensive or impossible to
 # regenerate. The agent refines this using peeks and directory names (e.g. a
@@ -276,3 +280,32 @@ name = "Nextflow launch dir"
 category = "code-env"
 dirs = [".nextflow"]
 files = [".nextflow.log"]
+
+# ---------------------------------------------------------------- hints (unknown, but likely)
+[[hint]]
+ext = [""]
+likely = "mixed: tool outputs, array-store chunks, workflow metadata"
+
+[[hint]]
+ext = ["suf", "lcp", "bck", "sti1", "ois", "tis", "des", "ssp", "sds", "prj", "llv", "skp"]
+likely = "suffix-array index (Vmatch/mkvtree or GenomeTools); rebuildable from FASTA"
+
+[[hint]]
+ext = ["meryldata", "meryl"]
+likely = "Meryl k-mer database"
+
+[[hint]]
+ext = ["pack"]
+likely = "git pack files"
+
+[[hint]]
+ext = ["hdf"]
+likely = "HDF data file"
+
+[[hint]]
+ext = ["hmm"]
+likely = "HMMER profile models"
+
+[[hint]]
+ext = ["bin"]
+likely = "generic binary (tool caches or models)"

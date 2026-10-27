@@ -14,6 +14,14 @@ wrapped in `<!-- table:NAME -->` ... `<!-- /table -->`, and report.md is rewritt
 with it. A re-render regenerates every wrapped table, so the tables are identical
 for the same summary.json. Names: see TABLES.
 
+Fixed sentences work the same way: `{{facts:NAME}}` becomes bullets written from
+summary.json (totals, coverage, method and limits), so the agent writes only
+interpretation. Names: see FACTS.
+
+After filling, a survey report is linted (warnings only): prose over a section's
+word budget, numbers that repeat a table or facts block in the same section, and
+hand-written row counts ("showing N of M"; the tables print their own).
+
   python3 render.py --run audits/<run>
 """
 from __future__ import annotations
@@ -24,9 +32,14 @@ import json
 import os
 import re
 import sys
+import tomllib
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common as C  # noqa: E402
+
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.realpath(os.path.join(SCRIPTS, *[os.pardir] * 4))   # excluded when inside a target
 
 CSS = """
 :root{--bg:#fff;--fg:#1d2025;--muted:#5d6470;--line:#d9dde3;--soft:#f3f5f8;--accent:#a51c30}
@@ -218,6 +231,79 @@ def _code(p) -> str:
     return f"`{p}`"
 
 
+def _keep(parts: list[str], idx) -> str:
+    """Join the components at `idx`, with '…' wherever components are left out."""
+    out, prev = [], -1
+    for i in sorted(set(idx) & set(range(len(parts)))):
+        if i > prev + 1:
+            out.append("…")
+        out.append(parts[i])
+        prev = i
+    return "/".join(out + (["…"] if prev < len(parts) - 1 else []))
+
+
+def _short(p, maxlen: int = 72) -> str:
+    """Shorten a long path in the middle, keeping its first three (area and project)
+    and last two components, then fewer."""
+    p = str(p)
+    parts = p.split("/")
+    for idx in ((0, 1, 2, -2, -1), (0, 1, 2, -1), (0, 1, -1), (0, -1)):
+        if len(p) <= maxlen:
+            break
+        p = _keep(parts, [i % len(parts) for i in idx])
+    return p
+
+
+def _path(p) -> str:
+    return _code(_short(p))
+
+
+def _paths(ps) -> list[str]:
+    """Shorten a table's paths as inline code; paths that would shorten to the same text
+    also keep the first component where they differ."""
+    ps = [str(p) for p in ps]
+    short = [_short(p) for p in ps]
+    out = list(short)
+    for i, p in enumerate(ps):
+        twins = [q for j, q in enumerate(ps) if short[j] == short[i] and q != p]
+        if twins:
+            parts = p.split("/")
+            k = min(next((n for n, (x, y) in enumerate(zip(parts, q.split("/"))) if x != y),
+                         len(parts) - 1) for q in twins)
+            out[i] = _keep(parts, (0, 1, 2, k, len(parts) - 2, len(parts) - 1))
+    return [_code(x) for x in out]
+
+
+def _pair(a: str, b: str, maxlen: int = 60) -> tuple[str, str]:
+    """Two paths shortened so they stay distinguishable: each keeps its first three
+    components, the first component where they differ, and its last component."""
+    pa, pb = a.split("/"), b.split("/")
+    k = next((i for i, (x, y) in enumerate(zip(pa, pb)) if x != y), min(len(pa), len(pb)))
+    def one(parts):
+        q = "/".join(parts)
+        return q if len(q) <= maxlen else _keep(parts, (0, 1, 2, k, len(parts) - 1))
+    return _code(one(pa)), _code(one(pb))
+
+
+def _clip(name, maxlen: int = 40) -> str:
+    name = str(name)
+    return name if len(name) <= maxlen else name[:maxlen // 2 - 1] + "…" + name[-(maxlen // 2 - 1):]
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n:,} {one if n == 1 else many}"
+
+
+def _parent(p: str) -> str:
+    return p.rsplit("/", 1)[0] if "/" in p else "."
+
+
+def _cutoff(s: dict, years: int) -> str:
+    """The summary's date minus `years`, as YYYY-MM-DD ('' if unknown)."""
+    g = (s.get("generated") or "")[:10]
+    return f"{int(g[:4]) - years}{g[4:]}" if len(g) == 10 else ""
+
+
 def _n(x) -> str:
     return "" if x is None else f"{x:,}"
 
@@ -235,6 +321,10 @@ def _md(head: list[str], body: list[list]) -> list[str]:
     return out
 
 
+def _md_or_none(head: list[str], body: list[list]) -> list[str]:
+    return _md(head, body) if body else ["None found."]
+
+
 def _showing(shown: int, total: int, what: str = "rows") -> list[str]:
     return [f"Showing {shown:,} of {total:,} {what}."] if total > shown else []
 
@@ -250,11 +340,11 @@ def _content(cats, nb) -> str:
 def _folder_rows(s: dict, rows: list[dict]) -> list[list]:
     tb = s["totals"]["bytes"]
     out = []
-    for r in rows:
+    for name, r in zip(_paths(r["path"] for r in rows), rows):
         size = C.human_bytes(r["bytes"])
         if r["status"] != "ok":
             size += f" ({r['status']})"
-        out.append([_code(r["path"]), size, _pct(r["bytes"], tb), _n(r["files"]),
+        out.append([name, size, _pct(r["bytes"], tb), _n(r["files"]),
                     _content(r["top_categories"], r["bytes"]), r["top_owner"] or "",
                     r["newest"] or "", r["last_activity"] or ""])
     return out
@@ -284,25 +374,83 @@ def t_areas_detail(s, limit=15):
 
 def t_users(s, limit=15):
     u = s["users"]
+    cut = _cutoff(s, 2)
+
+    def note(r):
+        out = [] if r["in_group"] else ["not in group" if r["user"] else "deleted account"]
+        if cut and r["newest"] and r["newest"] < cut:
+            out.append("no new files in 2+ years")
+        return "; ".join(out)
     body = [[r["user"] or f"(deleted, uid {r['uid']})", "yes" if r["in_group"] else "no",
-             C.human_bytes(r["bytes"]), _n(r["files"]), r["newest"] or ""]
+             C.human_bytes(r["bytes"]), _n(r["files"]), r["newest"] or "", note(r)]
             for r in _rows(u["table"])[:limit]]
-    return _md(["User", "In group", "Size", "Files", "Newest file"], body) + _showing(
+    return _md(["User", "In group", "Size", "Files", "Newest file", "Note"], body) + _showing(
         len(body), u["n"], "users")
+
+
+def _frac(x) -> str:
+    return "?" if x is None else f"{round(100 * x)}%"
+
+
+def t_duplicates(s, limit=12):
+    """Folder pairs and single-file groups in one list, largest first. A file group whose
+    copies all sit in a listed folder pair is counted in that pair's row."""
+    d = s["duplicates"]
+    groups = _rows(d["top_groups"])
+    gdirs = [{_parent(p) for p in g["paths"]} for g in groups]
+    items = []
+    for o in _rows(d["dir_overlap"]):
+        cover = [g for g, ds in zip(groups, gdirs) if {o["dir_a"], o["dir_b"]} <= ds]
+        if cover and o["shared_files"] <= len(cover):
+            continue                # only copies of listed groups: they show as group rows
+        items.append({"rec": o["shared_bytes"], "pair": o, "groups": []})
+    for g, ds in zip(groups, gdirs):
+        home = next((it for it in items if "pair" in it
+                     and ds <= {it["pair"]["dir_a"], it["pair"]["dir_b"]}), None)
+        if home:
+            home["groups"].append(g)
+            home["rec"] = max(home["pair"]["shared_bytes"],
+                              sum(x["reclaimable_outside_pipeline_work"] for x in home["groups"]))
+        else:
+            items.append({"rec": g["reclaimable_outside_pipeline_work"], "group": g})
+    items.sort(key=lambda it: -it["rec"])
+    body = []
+    for it in items[:limit]:
+        if "pair" in it:
+            o, gs = it["pair"], it["groups"]
+            copies = max([2] + [x["copies_outside_pipeline_work"] for x in gs])
+            body.append([f"{_plural(o['shared_files'], 'file', 'files')} ({_frac(o.get('frac_a'))} / "
+                         f"{_frac(o.get('frac_b'))} of each folder)", _n(copies),
+                         C.human_bytes(o["shared_bytes"]), C.human_bytes(it["rec"]),
+                         " and ".join(_pair(o["dir_a"], o["dir_b"]))])
+        else:
+            g = it["group"]
+            dirs = list(dict.fromkeys(_parent(p) for p in g["paths"]))[:2]
+            more = g["copies_outside_pipeline_work"] - sum(_parent(p) in dirs for p in g["paths"])
+            where = " and ".join(_pair(*dirs)) if len(dirs) == 2 else ", ".join(_paths(dirs))
+            body.append([_code(os.path.basename(g["paths"][0])) if g["paths"] else "",
+                         _n(g["copies_outside_pipeline_work"]), C.human_bytes(g["size"]),
+                         C.human_bytes(g["reclaimable_outside_pipeline_work"]),
+                         where + (f" (+{more} more)" if more > 0 else "")])
+    n_groups = _total(s, "duplicates.top_groups", d["top_groups"])
+    n_pairs = d.get("n_dir_overlap", len(d["dir_overlap"]["rows"]))
+    return _md_or_none(["Item", "Copies", "Size each", "Reclaimable", "Where"], body) + (
+        [f"Largest first: {len(body):,} items from {n_groups:,} duplicate groups and {n_pairs:,} "
+         "folder pairs outside pipeline work."] if body else [])
 
 
 def t_big_duplicates(s, limit=10):
     t = s["duplicates"]["top_groups"]
     body = [[C.human_bytes(r["size"]), _n(r["copies_outside_pipeline_work"]),
              C.human_bytes(r["reclaimable_outside_pipeline_work"]),
-             _code(r["paths"][0]) if r["paths"] else ""] for r in _rows(t)[:limit]]
+             _path(r["paths"][0]) if r["paths"] else ""] for r in _rows(t)[:limit]]
     return _md(["Size each", "Copies", "Reclaimable", "Example path"], body) + _showing(
         len(body), _total(s, "duplicates.top_groups", t), "duplicate groups")
 
 
 def t_dir_overlap(s, limit=10):
     t = s["duplicates"]["dir_overlap"]
-    body = [[_code(r["dir_a"]), _code(r["dir_b"]), C.human_bytes(r["shared_bytes"]),
+    body = [[*_pair(r["dir_a"], r["dir_b"]), C.human_bytes(r["shared_bytes"]),
              _n(r["shared_files"])] for r in _rows(t)[:limit]]
     return _md(["Folder A", "Folder B", "Shared", "Files"], body) + _showing(
         len(body), _total(s, "duplicates.dir_overlap", t), "folder pairs")
@@ -311,7 +459,7 @@ def t_dir_overlap(s, limit=10):
 def t_dir_trees(s, limit=10):
     t = s["duplicates"]["dir_trees"]
     body = [[_n(r["copies"]), C.human_bytes(r["bytes_each"]), _n(r["files_each"]),
-             C.human_bytes(r["reclaimable"]), ", ".join(_code(p) for p in r["paths"][:2])]
+             C.human_bytes(r["reclaimable"]), ", ".join(_path(p) for p in r["paths"][:2])]
             for r in _rows(t["top"])[:limit]]
     return _md(["Copies", "Size each", "Files each", "Reclaimable", "Example paths"],
                body) + _showing(len(body), t["n"], "duplicate trees")
@@ -319,43 +467,61 @@ def t_dir_trees(s, limit=10):
 
 def t_unreadable(s, limit=15):
     p = s["problem_dirs"]
-    body = [[_code(r["parent"]), r["status"], _n(r["n"]),
-             ", ".join(_code(e) for e in r["examples"]), ", ".join(r["owners"]),
+    rows = _rows(p["groups"])[:limit]
+    body = [[name, r["status"], _n(r["n"]),
+             ", ".join(_code(_clip(e)) for e in r["examples"]), ", ".join(r["owners"]),
              _n(r["owners_outside_group"]), r["newest"] or ""]
-            for r in _rows(p["groups"])[:limit]]
+            for name, r in zip(_paths(r["parent"] for r in rows), rows)]
     return _md(["Parent", "Status", "Count", "Examples", "Owners", "Owners outside group",
                 "Newest"], body) + _showing(len(body), p["n_groups"], "groups")
 
 
 def t_raw_data(s, limit=10):
     r_ = s["raw_locations"]
-    body = [[_code(r["path"]), r["ftype"], _n(r["dirs"]), _n(r["files"]),
-             C.human_bytes(r["bytes"]), r["newest"] or ""] for r in _rows(r_["top"])[:limit]]
+    rows = _rows(r_["top"])[:limit]
+    body = [[name, r["ftype"], _n(r["dirs"]), _n(r["files"]), C.human_bytes(r["bytes"]),
+             r["newest"] or ""] for name, r in zip(_paths(r["path"] for r in rows), rows)]
     return _md(["Folder", "Type", "Dirs", "Files", "Size", "Newest"], body) + _showing(
         len(body), _total(s, "raw_locations.top", r_["top"]), "locations")
 
 
+def _hints() -> dict[str, str]:
+    """rules.toml [[hint]] entries: extensions we can only guess at (not classified)."""
+    with open(os.path.join(SCRIPTS, "rules.toml"), "rb") as fh:
+        rules = tomllib.load(fh)
+    return {e.lower(): h["likely"] for h in rules.get("hint", []) for e in h.get("ext", [])}
+
+
 def t_unknown_types(s, limit=10):
     u = s["unknown_exts"]
+    hints = _hints()
     body = [[_code(r["ext"]) if r["ext"] else "(none)", _n(r["files"]),
-             C.human_bytes(r["bytes"]), _n(r["dirs"]), r["newest"] or ""]
+             C.human_bytes(r["bytes"]), _n(r["dirs"]), r["newest"] or "",
+             hints.get((r["ext"] or "").lower(), "")]
             for r in _rows(u["top"])[:limit]]
-    return _md(["Extension", "Files", "Size", "Dirs", "Newest"], body) + _showing(
+    return _md(["Extension", "Files", "Size", "Dirs", "Newest", "Likely"], body) + _showing(
         len(body), u["n"], "unknown extensions")
 
 
 def t_pipeline_workdirs(s, limit=10):
     w = s["pipeline_workdirs"]
-    body = [[_code(r["path"]), r["marker"], C.human_bytes(r["bytes"]), _n(r["files"]),
-             r["newest"] or ""] for r in _rows(w["top"])[:limit]]
+    rows = _rows(w["top"])[:limit]
+    body = [[name, r["marker"], C.human_bytes(r["bytes"]), _n(r["files"]), r["newest"] or ""]
+            for name, r in zip(_paths(r["path"] for r in rows), rows)]
     return _md(["Folder", "Kind", "Size", "Files", "Newest"], body) + _showing(
         len(body), w["n"], "work dirs")
 
 
-def t_age(s):
-    return _md(["Year", "Files", "Size"], [[r["year"] or "(none)", _n(r["files"]),
-                                           C.human_bytes(r["bytes"])]
-                                          for r in _rows(s["age_by_year"])])
+def t_age(s, span=10):
+    """Files by year of last change; years more than `span` before the run are one row."""
+    rows = _rows(s["age_by_year"])
+    old = int((s.get("generated") or "0")[:4]) - span
+    early = [r for r in rows if r["year"] and int(r["year"]) <= old]
+    body = ([[f"{old} and earlier", _n(sum(r["files"] for r in early)),
+              C.human_bytes(sum(r["bytes"] for r in early))]] if len(early) > 1 else [])
+    body += [[r["year"] or "(none)", _n(r["files"]), C.human_bytes(r["bytes"])]
+             for r in rows if not (len(early) > 1 and r in early)]
+    return _md(["Year", "Files", "Size"], body)
 
 
 def t_size_histogram(s):
@@ -373,22 +539,202 @@ def t_by_category(s):
         for r in _rows(s["by_category"])])
 
 
+def t_types(s, limit=10):
+    tb = s["totals"]["bytes"]
+    body = [[r["ftype"], r["category"], C.human_bytes(r["bytes"]), _pct(r["bytes"], tb),
+             _n(r["files"]), r["newest"] or ""] for r in _rows(s["types"])[:limit]]
+    return _md(["Type", "Category", "Size", "Share", "Files", "Newest"], body) + _showing(
+        len(body), len(s["types"]["rows"]), "types")
+
+
+def t_sensitive(s, limit=5):
+    x = s["sensitive"]
+    rows = _rows(x["top_dirs_elsewhere"])[:limit]
+    body = [[name, _n(r["files"])] for name, r in zip(_paths(r["dir"] for r in rows), rows)]
+    return _md_or_none(["Folder with credential-like names (outside software environments)",
+                        "Files"], body) + _showing(len(body), x.get("n_dirs_elsewhere", 0), "folders")
+
+
+SMALL_AVG = 1 << 20          # "many small files": average under 1 MiB ...
+SMALL_MIN_FILES = 100_000    # ... over at least this many files
+
+
+def t_small_files(s, limit=8):
+    """Folders with many small files: the deepest listed folders (no listed subfolder)."""
+    rows = [r for r in _rows(s["folders"]) if r["path"] != "." and r["files"]]
+    paths = [r["path"] for r in rows]
+    leaf = [r for r in rows if not any(p.startswith(r["path"] + "/") for p in paths)]
+    small = sorted((r for r in leaf if r["files"] >= SMALL_MIN_FILES
+                    and r["bytes"] / r["files"] < SMALL_AVG), key=lambda r: (-r["files"], r["path"]))
+    body = [[name, _n(r["files"]), C.human_bytes(r["bytes"]), C.human_bytes(r["bytes"] / r["files"])]
+            for name, r in zip(_paths(r["path"] for r in small[:limit]), small[:limit])]
+    return _md_or_none(["Folder", "Files", "Size", "Average file"], body) + _showing(
+        len(body), len(small), "folders")
+
+
+def t_touched_old(s, limit=8):
+    """Folders whose newest file is a year or more older than their last activity."""
+    def gap(r):
+        a, b = r.get("newest"), r.get("last_activity")
+        return (date.fromisoformat(b) - date.fromisoformat(a)).days if a and b else 0
+    rows = sorted((r for r in _rows(s["folders"]) if gap(r) >= 365),
+                  key=lambda r: (-r["bytes"], r["path"]))
+    body = [[name, C.human_bytes(r["bytes"]), r["newest"], r["last_activity"]]
+            for name, r in zip(_paths(r["path"] for r in rows[:limit]), rows[:limit])]
+    return _md_or_none(["Folder", "Size", "Newest file", "Last activity"], body) + _showing(
+        len(body), len(rows), "folders")
+
+
 TABLES = {name[2:]: fn for name, fn in globals().items() if name.startswith("t_")}
-# the tables each template asks for; a report missing one gets a warning
+
+# ------------------------------------------------------------- fixed sentences (facts)
+
+def _size(b) -> str:            # thresholds read better without ".0": "256 MiB"
+    return C.human_bytes(b).replace(".0 ", " ")
+
+
+def f_scope(s):
+    r, t = s["run"], s["totals"]
+    dp = s.get("post_stats", {}).get("dupes", {})
+    tgt, survey = r["target"], s.get("mode") == "survey"
+
+    def rel(p):
+        q = os.path.relpath(p, tgt) if p.startswith(tgt + "/") else p
+        return _code(q) + (" (this tool's repo, always excluded)"
+                           if os.path.realpath(p) == REPO else "")
+    roots = [x for x in r.get("roots", ["."]) if x != "."]
+    read = (f"- **Read:** metadata for {_n(t['files'])} files, {_n(t.get('symlinks', 0))} "
+            f"symlinks and {_n(t['dirs'])} directories")
+    if dp.get("candidates"):
+        err = dp.get("hash_errors", 0)
+        read += (f"; partial hashes (three {_size(dp.get('chunk', 1 << 20))} slices) of "
+                 f"{_n(dp['candidates'] - err)} files ≥ {_size(dp.get('min_size', 0))} that share a size"
+                 + (f" ({_n(err)} couldn't be read)" if err else ""))
+    read += ("; no file contents." if survey
+             else f"; content samples from {_n(s.get('peeks', {}).get('n', 0))} files.")
+    limits = ("- **Limits:** file types come from extensions only. Duplicates are compared only "
+              f"for files ≥ {_size(dp.get('min_size', 0))}, by partial hash, so they are likely, "
+              "not byte-confirmed. Small-file duplicates and duplicate folder trees aren't "
+              "reported, and only the names that reach `summary.json` were screened for "
+              "injected instructions." if survey else
+              "- **Limits:** duplicates are likely (partial hash) unless marked confirmed; "
+              "unreadable directories are listed below and weren't scanned.")
+    return [f"- **Target:** {_code(tgt)}" + (f", only {', '.join(_code(x) for x in roots)}"
+                                            if roots else "")
+            + f"; {s.get('mode', 'deep')} mode; scanned {r['created'][:10]}.",
+            "- **Excluded:** " + (", ".join(rel(e) for e in r.get("excludes", [])) or "none") + ".",
+            read, limits]
+
+
+def f_storage(s):
+    t = s["totals"]
+    hl = s.get("duplicates", {}).get("hardlinks", {}).get("saved_bytes", 0)
+    inodes = t["files"] + t["dirs"] + t.get("symlinks", 0) + t.get("other", 0)
+    return [f"- **Scanned:** {C.human_bytes(t['bytes'])} by path in {_n(t['files'])} files"
+            + (f"; {C.human_bytes(hl)} of that is extra paths to hardlinked files, so about "
+               f"{C.human_bytes(t['bytes'] - hl)} is on disk." if hl else "."),
+            f"- **Inodes seen:** {_n(inodes)} (files, directories, symlinks and other), "
+            "to compare with `quota`'s file count."]
+
+
+def f_age(s):
+    rows = [r for r in _rows(s["age_by_year"]) if r["year"]]
+    tb = sum(r["bytes"] for r in rows) or 1
+    year = int((s.get("generated") or "0000")[:4])
+    out = []
+    for label, n in (("2+ years", 2), ("5+ years", 5)):
+        sel = [r for r in rows if int(r["year"]) <= year - n]
+        b = sum(r["bytes"] for r in sel)
+        out.append(f"- **{label}:** {C.human_bytes(b)} ({_pct(b, tb)} of scanned bytes, "
+                   f"{_n(sum(r['files'] for r in sel))} files) last changed in {year - n} or earlier.")
+    out.append("- Dates are file modification times; hardlinked files count once per path.")
+    return out
+
+
+def f_types(s):
+    cats = {r["category"]: r for r in _rows(s["by_category"])}
+    raw, unk, rl = cats.get("raw", {}), cats.get("unknown", {}), s["raw_locations"]
+    marks = ", ".join(f"{k.replace(' run folder', '')} {v['n']:,}"
+                      for k, v in sorted(s.get("markers", {}).items())
+                      if v.get("category") == "raw" and "run folder" in k)
+    x = s["sensitive"]
+    skipped = s.get("dir_status", {}).get("sensitive", 0)
+    return [f"- **Raw data:** {C.human_bytes(raw.get('bytes', 0))} in {_n(raw.get('files', 0))} "
+            f"files; raw locations hold {C.human_bytes(rl['bytes'])} across {_n(rl['dirs'])} "
+            "directories" + (f". Run folders: {marks}." if marks else "."),
+            f"- **Unclassified:** {C.human_bytes(unk.get('bytes', 0))} in "
+            f"{_n(unk.get('files', 0))} files with {_n(s['unknown_exts']['n'])} different extensions.",
+            f"- **Credential-like names:** {_n(x['files'])} files, {_n(x['in_code_env'])} of them "
+            f"inside software environments; {_n(x['elsewhere'])} elsewhere, in "
+            f"{_n(x.get('n_dirs_elsewhere', 0))} folders. Matched by name only, never opened"
+            + (f"; {_n(skipped)} folders with such names weren't scanned." if skipped else ".")]
+
+
+def f_duplicates(s):
+    d = s["duplicates"]
+    dp = s.get("post_stats", {}).get("dupes", {})
+    hl = d.get("hardlinks", {}).get("saved_bytes", 0)
+    out = [f"- **Totals:** {_n(d['file_groups'])} groups of identical files"
+           + (f" ≥ {_size(dp['min_size'])}" if dp.get("min_size") else "")
+           + f"; {C.human_bytes(d['reclaimable_bytes'])} could be reclaimed, "
+           f"{C.human_bytes(d['reclaimable_bytes_outside_pipeline_work'])} of it outside pipeline "
+           f"work ({_n(d['file_groups_outside_pipeline_work'])} groups). "
+           f"{_n(d.get('n_dir_overlap', 0))} pairs of folders share duplicate files.",
+           "- **Method:** " + ("full hashes; confirmed duplicates." if d.get("confirmed") else
+                               "size plus a partial hash, so these are likely duplicates, not "
+                               "byte-confirmed.")
+           + (f" Hardlinks ({C.human_bytes(hl)} of extra paths) already share their data and "
+              "aren't counted." if hl else "")]
+    extra = []
+    if dp.get("groups_too_wide_for_pairs"):
+        n = dp["groups_too_wide_for_pairs"]
+        extra.append(f"{_plural(n, 'group spans', 'groups span')} more than "
+                     f"{dp.get('max_pair_dirs', 20)} folders and {'isn' if n == 1 else 'aren'}'t paired")
+    if dp.get("hash_errors"):
+        extra.append(f"{_plural(dp['hash_errors'], 'file', 'files')} couldn't be read")
+    if extra:
+        out.append("- **Gaps:** " + "; ".join(extra) + ".")
+    return out
+
+
+def f_pipeline(s):
+    w = s["pipeline_workdirs"]
+    return [f"- **Pipeline work dirs:** {_n(w['n'])} (Nextflow `work/`, Snakemake `.snakemake/` "
+            f"and similar) hold {C.human_bytes(w['bytes'])} in {_n(w['files'])} files."]
+
+
+def f_unreadable(s):
+    p, ds = s["problem_dirs"], s.get("dir_status", {})
+    out = [f"- **Unreadable:** {_n(ds.get('unreadable', p['n']))} directories, grouped by "
+           f"parent into {_n(p['n_groups'])} groups below."]
+    if ds.get("sensitive"):
+        out.append(f"- **Skipped:** {_n(ds['sensitive'])} directories whose names look like "
+                   "credential stores weren't scanned.")
+    return out
+
+
+FACTS = {name[2:]: fn for name, fn in globals().items() if name.startswith("f_")}
+
+# the blocks each template asks for; a report missing one gets a warning
 REQUIRED = {
-    "survey": ("areas_top", "areas_detail", "users", "age", "raw_data", "unknown_types",
-               "big_duplicates", "dir_overlap", "unreadable", "size_histogram", "by_category"),
+    "survey": ("facts:scope", "facts:storage", "areas_top", "areas_detail", "small_files",
+               "facts:pipeline", "pipeline_workdirs", "touched_old", "users", "age", "facts:age",
+               "facts:types", "types", "raw_data", "unknown_types", "sensitive",
+               "facts:duplicates", "duplicates", "facts:unreadable", "unreadable",
+               "size_histogram", "by_category"),
     "deep": ("areas_top", "areas_detail", "users", "raw_data", "big_duplicates", "dir_trees",
              "dir_overlap", "pipeline_workdirs", "unreadable", "age", "by_category",
              "unknown_types"),
 }
-_MARK = re.compile(r"^\{\{table:([a-z_]+)\}\}\s*$")
-_REGION = re.compile(r"^<!-- table:([a-z_]+) -->$")
+_MARK = re.compile(r"^\{\{(table|facts):([a-z_]+)\}\}\s*$")
+_REGION = re.compile(r"^<!-- (table|facts):([a-z_]+) -->$")
+_KINDS = {"table": TABLES, "facts": FACTS}
 
 
 def expand(md: str, summary: dict) -> tuple[str, list[str]]:
-    """Fill every {{table:NAME}} marker and regenerate every wrapped table.
-    Returns (new markdown, names used). Unknown names raise ValueError."""
+    """Fill every {{table:NAME}} / {{facts:NAME}} marker and regenerate every wrapped block.
+    Returns (new markdown, blocks used: table names bare, facts as 'facts:NAME').
+    Unknown names raise ValueError."""
     out, used = [], []
     lines = md.splitlines()
     i = 0
@@ -399,20 +745,65 @@ def expand(md: str, summary: dict) -> tuple[str, list[str]]:
             out.append(ln)
             i += 1
             continue
-        name = m.group(1)
-        if name not in TABLES:
-            raise ValueError(f"unknown table {name!r}; valid: {', '.join(sorted(TABLES))}")
-        if _REGION.match(ln):                       # skip the old table up to its end mark
-            while i < len(lines) and lines[i] != "<!-- /table -->":
+        kind, name = m.groups()
+        if name not in _KINDS[kind]:
+            raise ValueError(f"unknown {kind} {name!r}; valid: {', '.join(sorted(_KINDS[kind]))}")
+        if _REGION.match(ln):                       # skip the old block up to its end mark
+            while i < len(lines) and lines[i] != f"<!-- /{kind} -->":
                 i += 1
         try:
-            table = TABLES[name](summary)
+            block = _KINDS[kind][name](summary)
         except KeyError as ex:                      # section absent from this summary
-            table = [f"Not available: `summary.json` has no {ex}."]
-        out += [f"<!-- table:{name} -->", *table, "<!-- /table -->"]
-        used.append(name)
+            block = [f"Not available: `summary.json` has no {ex}."]
+        out += [f"<!-- {kind}:{name} -->", *block, f"<!-- /{kind} -->"]
+        used.append(name if kind == "table" else f"facts:{name}")
         i += 1
     return "\n".join(out) + "\n", used
+
+
+# words of the agent's own prose per section (tables and generated blocks don't count)
+BUDGETS = {"survey": {"Key findings": 160, "Scope and method": 20, "Storage usage": 60,
+                      "Areas": 90, "Users": 60, "Age": 60, "Data types": 90,
+                      "Big duplicates": 90, "Unreadable directories": 60,
+                      "Recommended deep audits": 60, "Questions for the PI": 140,
+                      "Flagged content": 40, "Appendix": 30}}
+_FREE = ("Key findings", "Recommended deep audits", "Questions for the PI")   # may repeat numbers
+_NUMS = re.compile(r"\d[\d,]*(?:\.\d+)?\s?(?:[KMGTP]iB|%)|\d{1,3}(?:,\d{3})+")
+
+
+def lint(md: str, mode: str) -> list[str]:
+    """Warnings for a filled report: sections over their prose budget, prose repeating a
+    number from a table or facts block in the same section, hand-written row counts."""
+    budgets = BUDGETS.get(mode)
+    if not budgets:
+        return []
+    warns: list[str] = []
+    for sec in re.split(r"^## ", md, flags=re.M)[1:]:
+        title, _, body = sec.partition("\n")
+        prose, data, inside = [], [], False
+        for ln in body.splitlines():
+            if _REGION.match(ln):
+                inside = True
+            elif re.match(r"^<!-- /(table|facts) -->$", ln):
+                inside = False
+            elif inside:
+                data.append(ln)
+            elif not ln.lstrip().startswith("|") and not re.match(r"^[^-*\s\d].*:\s*$", ln):
+                prose.append(ln)                    # (lines ending in ':' are template captions)
+        text = " ".join(prose)
+        key = next((k for k in budgets if title.startswith(k)), None)
+        words = len(re.findall(r"\S+", re.sub(r"\*\*[^*]+:\*\*|None\.", "", text)))
+        if key and words > budgets[key]:
+            warns.append(f"'{title}': {words} words of prose (budget {budgets[key]})")
+        if re.search(r"\bshowing\s+\d", text, re.I):
+            warns.append(f"'{title}': row counts are printed by the tables; don't write 'showing N'")
+        if not title.startswith(_FREE):
+            norm = lambda x: re.sub(r"\s", "", x)  # noqa: E731
+            have = {norm(x) for x in _NUMS.findall(" ".join(data))}
+            dup = sorted({x for x in _NUMS.findall(text) if norm(x) in have})
+            if dup:
+                warns.append(f"'{title}': prose repeats {', '.join(dup[:5])} from its tables")
+    return warns
 
 
 def main(argv=None) -> int:
@@ -428,10 +819,14 @@ def main(argv=None) -> int:
         with open(sj, encoding="utf-8") as fh:
             summary = json.load(fh)
         md, used = expand(md, summary)
-        C.log(f"filled tables: {', '.join(used) or 'none'}")
-        missing = [n for n in REQUIRED.get(summary.get("mode", "deep"), ()) if n not in used]
+        C.log(f"filled: {', '.join(used) or 'none'}")
+        mode = summary.get("mode", "deep")
+        missing = [n for n in REQUIRED.get(mode, ()) if n not in used]
         if missing:
-            C.log(f"WARNING: report.md has no {{{{table:...}}}} line for: {', '.join(missing)}")
+            C.log(f"WARNING: report.md has no {{{{table:...}}}}/{{{{facts:...}}}} line for: "
+                  f"{', '.join(missing)}")
+        for w in lint(md, mode):
+            C.log(f"WARNING: {w}")
         with open(src + ".tmp", "w", encoding="utf-8") as fh:
             fh.write(md)
         os.replace(src + ".tmp", src)

@@ -162,15 +162,18 @@ def test_render_fills_tables(lab, tmp_path, capsys):
     """Every {{table:NAME}} marker is filled from summary.json, the same way every time."""
     run_dir = _run(lab, tmp_path, "--exclude", "excluded")
     names = sorted(render.TABLES)
-    md = "# Audit\n\n## Areas\n\n" + "\n\n".join(f"{{{{table:{n}}}}}" for n in names) + "\n"
+    facts = sorted(render.FACTS)
+    md = "# Audit\n\n## Areas\n\n" + "\n\n".join(
+        [f"{{{{table:{n}}}}}" for n in names] + [f"{{{{facts:{n}}}}}" for n in facts]) + "\n"
     with open(os.path.join(run_dir, "report.md"), "w") as fh:
         fh.write(md)
     assert render.main(["--run", run_dir]) == 0
     assert "WARNING" not in capsys.readouterr().err           # every required table present
     with open(os.path.join(run_dir, "report.md")) as fh:
         filled = fh.read()
-    assert "{{table:" not in filled
+    assert "{{table:" not in filled and "{{facts:" not in filled and "Not available" not in filled
     assert all(f"<!-- table:{n} -->" in filled for n in names)
+    assert all(f"<!-- facts:{n} -->" in filled for n in facts)
     assert render.main(["--run", run_dir]) == 0             # re-render: identical
     with open(os.path.join(run_dir, "report.md")) as fh:
         assert fh.read() == filled
@@ -178,7 +181,8 @@ def test_render_fills_tables(lab, tmp_path, capsys):
     assert "`userA`" in top and "`userB`" in top and "Share" in top
     with open(os.path.join(run_dir, "report.html")) as fh:
         page = fh.read()
-    assert "<!--" not in page and page.count("<table>") == len(names)
+    n_tables = sum("\n|" in b.split("<!-- /table -->")[0] for b in filled.split("<!-- table:")[1:])
+    assert "<!--" not in page and page.count("<table>") == n_tables
 
 
 def test_render_table_details():
@@ -198,3 +202,61 @@ def test_render_table_details():
     assert "Not available" in render.expand("{{table:users}}\n", s)[0]
     with pytest.raises(ValueError, match="unknown table 'nope'"):
         render.expand("{{table:nope}}\n", s)
+
+
+def test_render_facts_duplicates_and_lint():
+    pairs = {"cols": ["dir_a", "dir_b", "shared_bytes", "shared_files", "frac_a", "frac_b"],
+             "rows": [["p/a", "p/b", 5000, 3, 1.0, 0.5], ["q", "r", 900, 1, 0.5, 1.0]]}
+    groups = {"cols": ["size", "copies", "copies_outside_pipeline_work",
+                       "reclaimable_outside_pipeline_work", "confirmed", "paths"],
+              "rows": [[5000, 2, 2, 5000, 0, ["p/a/x.bam", "p/b/x.bam"]],          # inside the pair
+                       [900, 4, 4, 2700, 0, ["q/y.hal", "q/y.hal.bak", "r/y.hal"]]]}
+    s = {"mode": "survey", "generated": "2026-10-26T00:00:00",
+         "totals": {"bytes": 10000, "files": 10, "dirs": 3, "symlinks": 1, "other": 0},
+         "duplicates": {"dir_overlap": pairs, "top_groups": groups, "n_dir_overlap": 2,
+                        "file_groups": 2, "file_groups_outside_pipeline_work": 2,
+                        "reclaimable_bytes": 7700, "reclaimable_bytes_outside_pipeline_work": 7700,
+                        "confirmed": False, "hardlinks": {"groups": 1, "saved_bytes": 2048}},
+         "capped": {"duplicates.top_groups": [2, 7]},
+         "age_by_year": {"cols": ["year", "files", "bytes"],
+                         "rows": [["2020", 1, 1000], ["2024", 2, 3000], ["2026", 7, 6000]]}}
+    out, used = render.expand("{{table:duplicates}}\n{{facts:storage}}\n{{facts:age}}\n", s)
+    assert used == ["duplicates", "facts:storage", "facts:age"]
+    rows = [ln for ln in out.splitlines() if ln.startswith("| ") and "Item" not in ln]
+    assert len(rows) == 2           # x.bam folded into pair p/a-p/b; pair q-r is just y.hal
+    assert rows[0].startswith("| 3 files (100% / 50% of each folder) | 2 | 4.9 KiB | 4.9 KiB |")
+    assert rows[1].startswith("| `y.hal` | 4 |") and rows[1].endswith("`q` and `r` (+1 more) |")
+    assert "2 items from 7 duplicate groups and 2 folder pairs" in out
+    assert "2.0 KiB of that is extra paths to hardlinked files" in out
+    assert "- **2+ years:** 3.9 KiB (40.0% of scanned bytes, 3 files) last changed in 2024" in out
+    assert "- **5+ years:** 1000 B (10.0% of scanned bytes, 1 files) last changed in 2021" in out
+
+    md = out.replace("{{", "") + """
+## Big duplicates
+
+<!-- table:duplicates -->
+| Item | Reclaimable |
+|---|---|
+| `x.bam` | 4.9 KiB |
+<!-- /table -->
+
+- **Patterns:** the 4.9 KiB copy is real; showing 1 of 7 here.
+"""
+    warns = render.lint(md, "survey")
+    assert any("repeats 4.9 KiB" in w for w in warns)
+    assert any("don't write 'showing N'" in w for w in warns)
+    assert any("words of prose" in w for w in render.lint(
+        "## Users\n\n- **Patterns:** " + "word " * 61 + "\n", "survey"))
+    assert render.lint(md, "deep") == []
+
+
+def test_short_paths():
+    long = "Lab/projects/projC/pipeline/pipeline-workflows/data/species-one-set/output/01-prep-stage/autosomes"
+    assert render._short(long) == "Lab/projects/projC/…/01-prep-stage/autosomes"
+    assert render._short("a/b/c") == "a/b/c"
+    twins = ["x/y/z/" + "m" * 70 + "/one/aws/util", "x/y/z/" + "m" * 70 + "/two/aws/util"]
+    a, b = render._paths(twins)
+    assert a != b and "one" in a and "two" in b
+    a, b = render._pair(long, long.replace("species-one-set/output", "species-two-set/output-v3"))
+    assert a == "`Lab/projects/projC/…/species-one-set/…/autosomes`"
+    assert b == "`Lab/projects/projC/…/species-two-set/…/autosomes`"
