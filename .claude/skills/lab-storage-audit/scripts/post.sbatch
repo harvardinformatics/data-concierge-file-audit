@@ -9,6 +9,8 @@
 #   sbatch --parsable -p <partition> -t <time> -c <cpus> --mem=<mem> --dependency=afterany:<scan_jobid> \
 #     -o audits/<run>/slurm/%x-%j.out -e audits/<run>/slurm/%x-%j.err \
 #     .claude/skills/lab-storage-audit/scripts/post.sbatch audits/<run> [post.py options]
+# Post is single-threaded apart from hashing (I/O-bound workers): use -c 1 and pass
+# --workers 4 as a post.py option (it overrides the default of one per CPU).
 #SBATCH -J lsa-post
 #SBATCH --open-mode=append
 set -euo pipefail

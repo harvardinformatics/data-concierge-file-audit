@@ -36,6 +36,7 @@ If the PI doesn't name a mode, use **survey** for a lab root, or when `quota` sh
 2. **Scan and post** (SLURM)
    - Production uses `serial_requeue`; dev uses `test` or a partition the user names. Take limits from https://docs.rc.fas.harvard.edu/kb/running-jobs/#Slurm_Partitions, or from `spart` for partitions not listed there. Never paste a partition maximum in as a request.
    - Size the jobs from the `quota` file count with the table below, with about 3× margin on time. Big subtrees split into child shards on the fly, so more walkers help up to the cap of 16.
+   - **Cores.** Scan walkers wait on Lustre, not CPU (~25% CPU each), so walkers are about requests in flight; on `serial_requeue` use tasks of ≤ 8 CPUs (e.g. `--array=0-1 -c 8`). Post is single-threaded apart from hashing, whose workers also wait on I/O: request **`-c 1`** and pass `--workers 4` after the run dir. Extra post cores sit idle, and FASRC flags such jobs.
    - Show the PI the exact commands and resources, then submit them using the usage lines at the top of `scan_array.sbatch` and `post.sbatch`. Post depends on the scan with `afterany`, and picks its stages from the run's mode.
 
    | Per million files (approximate, from dev runs; slower for trees with many dirs or tiny files) | |
@@ -43,7 +44,8 @@ If the PI doesn't name a mode, use **survey** for a lab root, or when `quota` sh
    | walking | ~210–430 walker-seconds (16 walkers: ~15–30 s); size from the slow end |
    | post, survey | ~30 s |
    | post, deep | ~30 s, plus hashing: ~3 min per 15K duplicate candidates (files ≥ 1 MiB that share a size) at 4 workers; a multi-million-file project dir had about that many |
-   | post memory | ~2.4 GB peak measured on a survey of tens of millions of files; request with margin within the partition's limits |
+   | post memory | not per million: ~2.4–4.7 GB peak on surveys of tens of millions of files; request ~2.5× (e.g. 12G) within the partition's limits |
+   | scan memory | not per million: up to ~6 GB for an 8-walker task on tens of millions of files; request 12G per task |
    | `audit.sqlite` | ~0.25–0.4 GB in `audits/<run>/`; post builds it on node-local `/scratch` first, so that much again there. Post refuses to start if either place has less than ~24× the gzipped shard files free |
 3. **Wait** until `audits/<run>/post.DONE` or `post.FAILED` exists: a background `until [ -e …DONE ] || [ -e …FAILED ]; do sleep 60; done`.
    - On `FAILED`, read the sentinel JSON and `audits/<run>/slurm/*.err`, explain the failure, and stop.
