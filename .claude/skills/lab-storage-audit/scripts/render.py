@@ -6,7 +6,7 @@ nested lists, GFM pipe tables, fenced code, blockquotes, rules, `code`,
 **bold**, *italic* and [links](https://…). Underscores are never emphasis,
 because lab paths are full of them. Everything is HTML-escaped first (paths come
 from the target and are untrusted); links are kept only for http(s)/mailto
-and relative URLs. Inline CSS, light/dark theme, no external resources.
+and relative URLs. Inline CSS and script, light/dark theme, no external resources.
 
 Data tables are filled in by script, not written by the agent: a line
 `{{table:NAME}}` in report.md becomes a Markdown table built from summary.json,
@@ -17,6 +17,9 @@ for the same summary.json. Names: see TABLES.
 Fixed sentences work the same way: `{{facts:NAME}}` becomes bullets written from
 summary.json (totals, coverage, method and limits), so the agent writes only
 interpretation. Names: see FACTS.
+
+Charts too: `{{chart:NAME}}` becomes a one-line caption in report.md and an inline
+SVG (with a small inline script for hover) in report.html. Names: see CHARTS.
 
 After filling, a survey report is linted (warnings only): prose over a section's
 word budget, numbers that repeat a table or facts block in the same section, and
@@ -29,6 +32,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import math
 import os
 import re
 import sys
@@ -42,9 +46,12 @@ SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.realpath(os.path.join(SCRIPTS, *[os.pardir] * 4))   # excluded when inside a target
 
 CSS = """
-:root{--bg:#fff;--fg:#1d2025;--muted:#5d6470;--line:#d9dde3;--soft:#f3f5f8;--accent:#a51c30}
+:root{--bg:#fff;--fg:#1d2025;--muted:#5d6470;--line:#d9dde3;--soft:#f3f5f8;--accent:#a51c30;
+ --k0:#2a78d6;--k1:#eb6834;--k2:#1baf7a;--k3:#eda100;--k4:#e87ba4;--k5:#008300;--k6:#6250d6;
+ --ko:#a3a6ad;--kr:#e3e5e9}
 @media (prefers-color-scheme:dark){:root{--bg:#16181c;--fg:#e4e6ea;--muted:#9aa1ad;
- --line:#343842;--soft:#20232a;--accent:#e0707f}}
+ --line:#343842;--soft:#20232a;--accent:#e0707f;--k0:#3987e5;--k1:#d95926;--k2:#199e70;
+ --k3:#c98500;--k4:#d55181;--k5:#008300;--k6:#9085e9;--ko:#6b6f78;--kr:#363b45}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);
  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
@@ -60,7 +67,23 @@ th{background:var(--soft)}td.n,th.n{text-align:right;font-variant-numeric:tabula
 blockquote{margin:.8em 0;padding:.4em 1em;border-left:3px solid var(--accent);background:var(--soft)}
 hr{border:0;border-top:1px solid var(--line);margin:2em 0}
 nav{font-size:.92em;color:var(--muted);margin-bottom:1.5em}nav a{margin-right:.9em;white-space:nowrap}
-@media print{nav{display:none}a{color:inherit}}
+.sb{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:12px 32px;margin:1em 0 1.6em}
+.sb svg{width:100%;max-width:520px;height:auto;flex:1 1 320px}
+.sb path{stroke:var(--bg);stroke-width:1;transition:opacity .1s}.sb.sb-hl path{opacity:.22}
+.sb.sb-hl path.on{opacity:1}.sb text{text-anchor:middle;fill:var(--fg)}
+.sb .sb-c{font-size:22px;font-weight:600}.sb .sb-l{font-size:13px;fill:var(--muted)}
+.sb .k0{fill:var(--k0)}.sb i.k0{background:var(--k0)}.sb .k1{fill:var(--k1)}.sb i.k1{background:var(--k1)}.sb .k2{fill:var(--k2)}.sb i.k2{background:var(--k2)}.sb .k3{fill:var(--k3)}.sb i.k3{background:var(--k3)}.sb .k4{fill:var(--k4)}.sb i.k4{background:var(--k4)}.sb .k5{fill:var(--k5)}.sb i.k5{background:var(--k5)}.sb .k6{fill:var(--k6)}.sb i.k6{background:var(--k6)}
+.sb .ko{fill:var(--ko)}.sb i.ko{background:var(--ko)}.sb .kr{fill:var(--kr)}.sb i.kr{background:var(--kr)}
+.sb ul{list-style:none;margin:0;padding:0;font-size:.9em;min-width:220px}
+.sb li{display:flex;align-items:center;gap:8px;padding:3px 6px;border-radius:4px}
+.sb li[data-o]:hover,.sb li[data-o]:focus{background:var(--soft);outline:none}
+.sb i{width:10px;height:10px;border-radius:50%;flex:none}
+.sb li span:last-child{margin-left:auto;padding-left:16px;color:var(--muted);font-variant-numeric:tabular-nums}
+.sb-h{font-weight:600;font-size:.9em;margin-bottom:4px}.sb-note{font-size:.82em;color:var(--muted);max-width:260px}
+.sb-tip{display:none;position:absolute;z-index:2;pointer-events:none;max-width:340px;padding:8px 10px;
+ font-size:.85em;background:var(--bg);border:1px solid var(--line);border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.18)}
+.sb-tip strong{display:block}.sb-tip code{display:block;margin:2px 0 6px;font-size:.85em;background:none;padding:0;color:var(--muted)}
+@media print{nav{display:none}a{color:inherit}.sb-tip{display:none}}
 """
 
 _LIST = re.compile(r"^( *)([-*+]|\d+[.)]) +(.*)$")
@@ -151,7 +174,8 @@ def _list(lines: list[str]) -> str:
     return "".join(parts)
 
 
-def to_html(md: str) -> tuple[str, str, list[tuple[str, str]]]:
+def to_html(md: str, charts: dict | None = None) -> tuple[str, str, list[tuple[str, str]]]:
+    charts = charts or {}
     lines = md.splitlines()
     out: list[str] = []
     toc: list[tuple[str, str]] = []
@@ -197,6 +221,11 @@ def to_html(md: str) -> tuple[str, str, list[tuple[str, str]]]:
                 j += 1
             out.append(_list(lines[i:j]))
             i = j
+        elif (m := re.match(r"^<!-- chart:([a-z_]+) -->$", ln)) and m.group(1) in charts:
+            out.append(charts[m.group(1)])          # the caption inside is for report.md only
+            while i < len(lines) and lines[i] != "<!-- /chart -->":
+                i += 1
+            i += 1
         elif not ln.strip() or re.match(r"^<!--.*-->\s*$", ln):    # blank or table marks
             i += 1
         else:
@@ -209,8 +238,20 @@ def to_html(md: str) -> tuple[str, str, list[tuple[str, str]]]:
     return title, "\n".join(out), toc
 
 
-def render(md: str) -> str:
-    title, body, toc = to_html(md)
+def charts_for(md: str, summary: dict | None) -> dict[str, str]:
+    """HTML for every chart region in md that summary.json can draw."""
+    out = {}
+    for name in re.findall(r"^<!-- chart:([a-z_]+) -->$", md, re.M):
+        try:
+            if summary is not None and name in CHARTS:
+                out[name] = CHARTS[name](summary)
+        except KeyError:
+            pass
+    return out
+
+
+def render(md: str, summary: dict | None = None) -> str:
+    title, body, toc = to_html(md, charts_for(md, summary))
     nav = ("<nav>" + "".join(f'<a href="#{h}">{html.escape(t)}</a>' for h, t in toc)
            + "</nav>") if len(toc) > 2 else ""
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -715,9 +756,158 @@ def f_unreadable(s):
 
 FACTS = {name[2:]: fn for name, fn in globals().items() if name.startswith("f_")}
 
+# ------------------------------------------------------------- charts (HTML only)
+
+# A `{{chart:NAME}}` line becomes a one-line caption in report.md and an inline SVG in
+# report.html, drawn from summary.json at render time. Owner colours are the first 7 slots
+# of the dataviz skill's validated categorical palette (--k0..--k6 in CSS); a sunburst can
+# put any two owners side by side, so hover and the legend highlight carry identity too.
+N_SLOTS = 7
+CHART_NOTES = {"sunburst": "*Figure: folder sizes by main owner (interactive in report.html).*"}
+
+_SB_JS = """(function(){var f=document.currentScript.previousElementSibling,
+t=f.querySelector('.sb-tip'),g=[].slice.call(f.querySelectorAll('path[data-p]'));
+g.forEach(function(s){var x=s.querySelector('title');if(x)s.removeChild(x)});
+function mark(k){f.classList.toggle('sb-hl',!!k);g.forEach(function(s){s.classList.toggle('on',!!k&&k(s))})}
+function rel(p,q){return p===q||q.indexOf(p+'/')===0||p.indexOf(q+'/')===0}
+function row(v,l){var d=document.createElement('div'),b=document.createElement('b');
+b.textContent=v;d.appendChild(b);d.appendChild(document.createTextNode(' '+l));t.appendChild(d)}
+function show(s,e){var d=s.dataset;t.textContent='';var h=document.createElement('strong');
+h.textContent=d.n;t.appendChild(h);var c=document.createElement('code');c.textContent=d.p;t.appendChild(c);
+row(d.b,d.k?'not itemised: files directly in the folder, or folders too small to list':'('+d.pc+' of total)');
+if(!d.k){row(d.f,'files, '+d.d+' folders');row(d.o||'unknown','owns the most bytes');
+if(d.nw)row(d.nw,'newest file'+(d.la?', last activity '+d.la:''));if(d.st)row(d.st,'status')}
+t.style.display='block';var r=f.getBoundingClientRect(),x=e.clientX-r.left+14,y=e.clientY-r.top+14;
+if(x+t.offsetWidth>r.width)x=Math.max(0,x-t.offsetWidth-28);t.style.left=x+'px';t.style.top=y+'px'}
+function hide(){t.style.display='none';mark(null)}
+var v=f.querySelector('svg');v.addEventListener('pointermove',function(e){
+var s=e.target.closest('path[data-p]');if(!s)return hide();show(s,e);
+mark(function(q){return rel(s.dataset.p,q.dataset.p)})});v.addEventListener('pointerleave',hide);
+[].slice.call(f.querySelectorAll('li[data-o]')).forEach(function(l){var o=l.dataset.o;
+function on(){mark(function(q){return q.dataset.o===o&&!q.dataset.k})}
+l.addEventListener('pointerenter',on);l.addEventListener('focus',on);
+l.addEventListener('pointerleave',hide);l.addEventListener('blur',hide)})})();"""
+
+
+def _arc(r0: float, r1: float, a0: float, a1: float) -> str:
+    """SVG path of an annular sector; angles in radians, clockwise from 12 o'clock."""
+    def p(r, a):
+        return f"{r * math.sin(a):.1f},{-r * math.cos(a):.1f}"
+    if a1 - a0 >= 2 * math.pi - 1e-6:            # whole ring: two half circles, even-odd hole
+        return (f"M{p(r1, 0)}A{r1:.1f},{r1:.1f} 0 1 1 {p(r1, math.pi)}A{r1:.1f},{r1:.1f} 0 1 1 "
+                f"{p(r1, 0)}M{p(r0, 0)}A{r0:.1f},{r0:.1f} 0 1 0 {p(r0, math.pi)}"
+                f"A{r0:.1f},{r0:.1f} 0 1 0 {p(r0, 0)}Z")
+    big = int(a1 - a0 > math.pi)
+    return (f"M{p(r1, a0)}A{r1:.1f},{r1:.1f} 0 {big} 1 {p(r1, a1)}L{p(r0, a1)}"
+            f"A{r0:.1f},{r0:.1f} 0 {big} 0 {p(r0, a0)}Z")
+
+
+def c_sunburst(s, size: int = 600, min_angle: float = 0.002) -> str:
+    """Sunburst of the `folders` rows: rings go one level deeper from the centre, angle is
+    bytes, colour is the folder's top owner. Grey arcs are a folder's bytes not in a listed
+    subfolder. Untrusted names are escaped into attributes; the script reads them as text."""
+    rows = _rows(s["folders"])
+    if not rows:
+        raise KeyError("folders rows")
+    tb = s["totals"]["bytes"] or 1
+    by = {r["path"]: r for r in rows}
+
+    def up(p):
+        while p != ".":
+            p = _parent(p)
+            if p in by:
+                return p
+        return None
+    kids: dict = {}
+    for r in rows:
+        kids.setdefault(up(r["path"]), []).append(r)
+    tops = kids.get(None, [])
+    if len(tops) == 1:                               # one root: it's the centre
+        centre, lv0 = tops[0], tops[0]["level"]
+    else:                                            # several roots: a virtual centre
+        centre, lv0 = {"path": None, "bytes": tb}, -1
+        kids[None] = tops
+
+    segs = []                                        # (ring, a0, a1, row or rest dict)
+
+    def lay(node, a0, a1):
+        ks = sorted(kids.get(node["path"], []), key=lambda r: (-r["bytes"], r["path"]))
+        nb = max(node["bytes"], sum(k["bytes"] for k in ks), 1)
+        a = a0
+        for k in ks:
+            span = (a1 - a0) * k["bytes"] / nb
+            if span >= min_angle:
+                segs.append((k["level"] - lv0, a, a + span, k))
+                lay(k, a, a + span)
+            a += span
+        if ks and a1 - a >= min_angle:
+            rest = node["bytes"] - sum(k["bytes"] for k in ks)
+            segs.append((ks[0]["level"] - lv0, a, a1,
+                         {"path": f"{node['path'] or '.'}/…", "bytes": rest, "rest": True}))
+    lay(centre, 0.0, 2 * math.pi)
+    if not segs:
+        raise KeyError("folders below the top level")
+
+    # owner -> colour slot, by bytes owned in the whole target (users table order)
+    shown = {r.get("top_owner") for _, _, _, r in segs if not r.get("rest")}
+    order = [u["user"] or f"uid:{u['uid']}" for u in _rows(s["users"]["table"])] \
+        if "users" in s else []
+    order = [u for u in order if u in shown] + sorted(u for u in shown - set(order) if u)
+    slot = {u: i for i, u in enumerate(order[:N_SLOTS])}
+    owned = {(u["user"] or f"uid:{u['uid']}"): u["bytes"]
+             for u in _rows(s["users"]["table"])} if "users" in s else {}
+
+    R = size / 2 - 4
+    rings = max(g[0] for g in segs)
+    hole = R * (0.3 if rings > 2 else 0.36)
+    w = (R - hole) / rings
+    esc = lambda x: html.escape(str(x), quote=True)  # noqa: E731
+    out = [f'<svg viewBox="{-size / 2} {-size / 2} {size} {size}" role="img" '
+           f'aria-label="Sunburst chart of folder sizes, coloured by the user who owns the most '
+           f'bytes in each folder. The Areas tables list the same folders.">']
+    for ring, a0, a1, r in segs:
+        name = r["path"].rsplit("/", 1)[-1] if r["path"] != "." else r["path"]
+        d = _arc(hole + (ring - 1) * w, hole + ring * w, a0, a1)
+        attrs = {"p": r["path"], "n": name, "b": C.human_bytes(r["bytes"])}
+        if r.get("rest"):
+            cls, attrs["k"] = "kr", "rest"
+            attrs["n"] = "not itemised"
+            tip = f"{r['path']}: {attrs['b']} not itemised"
+        else:
+            o = r.get("top_owner")
+            cls = f"k{slot[o]}" if o in slot else "ko"
+            attrs |= {"pc": _pct(r["bytes"], tb), "f": _n(r["files"]), "d": _n(r["dirs"]),
+                      "o": o or "", "nw": r.get("newest") or "",
+                      "la": r.get("last_activity") or "",
+                      "st": "" if r.get("status", "ok") == "ok" else r["status"]}
+            tip = f"{r['path']}: {attrs['b']}, {_pct(r['bytes'], tb)}, owner {o or 'unknown'}"
+        data = "".join(f' data-{k}="{esc(v)}"' for k, v in attrs.items() if v != "")
+        out.append(f'<path class="{cls}" d="{d}"{data}><title>{esc(tip)}</title></path>')
+    label = centre["path"] or os.path.basename(s.get("run", {}).get("target", "")) or "target"
+    label = os.path.basename(s.get("run", {}).get("target", "")) if label == "." else label
+    out.append(f'<text class="sb-c" y="-4">{C.human_bytes(centre["bytes"])}</text>'
+               f'<text class="sb-l" y="16">{esc(_clip(label, 24))}</text></svg>')
+
+    items = [(f"k{slot[u]}", u, C.human_bytes(owned[u]) if u in owned else "")
+             for u in order[:N_SLOTS]]
+    if len(order) > N_SLOTS or None in shown:
+        items.append(("ko", "other users", ""))
+    items.append(("kr", "not itemised", ""))
+    legend = "".join(
+        (f'<li data-o="{esc(u)}" tabindex="0">' if c.startswith("k") and c[1:].isdigit()
+         else "<li>") + f'<i class="{c}"></i><span>{esc(u)}</span><span>{esc(b)}</span></li>'
+        for c, u, b in items)
+    return (f'<figure class="sb">{"".join(out)}<div><div class="sb-h">Main owner of each folder'
+            f'</div><ul>{legend}</ul><p class="sb-note">Size is all files the user owns here. '
+            "Each ring is one folder level deeper; hover a segment or a name.</p></div>"
+            f'<div class="sb-tip"></div></figure><script>{_SB_JS}</script>')
+
+
+CHARTS = {name[2:]: fn for name, fn in globals().items() if name.startswith("c_")}
+
 # the blocks each template asks for; a report missing one gets a warning
 REQUIRED = {
-    "survey": ("facts:scope", "facts:storage", "areas_top", "areas_detail", "small_files",
+    "survey": ("chart:sunburst", "facts:scope", "facts:storage", "areas_top", "areas_detail", "small_files",
                "facts:pipeline", "pipeline_workdirs", "touched_old", "users", "age", "facts:age",
                "facts:types", "types", "raw_data", "unknown_types", "sensitive",
                "facts:duplicates", "duplicates", "facts:unreadable", "unreadable",
@@ -726,14 +916,14 @@ REQUIRED = {
              "dir_overlap", "pipeline_workdirs", "unreadable", "age", "by_category",
              "unknown_types"),
 }
-_MARK = re.compile(r"^\{\{(table|facts):([a-z_]+)\}\}\s*$")
-_REGION = re.compile(r"^<!-- (table|facts):([a-z_]+) -->$")
-_KINDS = {"table": TABLES, "facts": FACTS}
+_MARK = re.compile(r"^\{\{(table|facts|chart):([a-z_]+)\}\}\s*$")
+_REGION = re.compile(r"^<!-- (table|facts|chart):([a-z_]+) -->$")
+_KINDS = {"table": TABLES, "facts": FACTS, "chart": CHARTS}
 
 
 def expand(md: str, summary: dict) -> tuple[str, list[str]]:
-    """Fill every {{table:NAME}} / {{facts:NAME}} marker and regenerate every wrapped block.
-    Returns (new markdown, blocks used: table names bare, facts as 'facts:NAME').
+    """Fill every {{table|facts|chart:NAME}} marker and regenerate every wrapped block.
+    Returns (new markdown, blocks used: table names bare, others as 'facts:NAME'/'chart:NAME').
     Unknown names raise ValueError."""
     out, used = [], []
     lines = md.splitlines()
@@ -753,10 +943,12 @@ def expand(md: str, summary: dict) -> tuple[str, list[str]]:
                 i += 1
         try:
             block = _KINDS[kind][name](summary)
+            if kind == "chart":                     # the SVG is drawn into report.html only
+                block = [CHART_NOTES[name]]
         except KeyError as ex:                      # section absent from this summary
             block = [f"Not available: `summary.json` has no {ex}."]
         out += [f"<!-- {kind}:{name} -->", *block, f"<!-- /{kind} -->"]
-        used.append(name if kind == "table" else f"facts:{name}")
+        used.append(name if kind == "table" else f"{kind}:{name}")
         i += 1
     return "\n".join(out) + "\n", used
 
@@ -784,7 +976,7 @@ def lint(md: str, mode: str) -> list[str]:
         for ln in body.splitlines():
             if _REGION.match(ln):
                 inside = True
-            elif re.match(r"^<!-- /(table|facts) -->$", ln):
+            elif re.match(r"^<!-- /(table|facts|chart) -->$", ln):
                 inside = False
             elif inside:
                 data.append(ln)
@@ -815,6 +1007,7 @@ def main(argv=None) -> int:
     with open(src, encoding="utf-8") as fh:
         md = fh.read()
     sj = C.out_path(args.run, "summary.json")
+    summary = None
     if os.path.exists(sj):
         with open(sj, encoding="utf-8") as fh:
             summary = json.load(fh)
@@ -823,14 +1016,14 @@ def main(argv=None) -> int:
         mode = summary.get("mode", "deep")
         missing = [n for n in REQUIRED.get(mode, ()) if n not in used]
         if missing:
-            C.log(f"WARNING: report.md has no {{{{table:...}}}}/{{{{facts:...}}}} line for: "
+            C.log(f"WARNING: report.md has no {{{{table|facts|chart:...}}}} line for: "
                   f"{', '.join(missing)}")
         for w in lint(md, mode):
             C.log(f"WARNING: {w}")
         with open(src + ".tmp", "w", encoding="utf-8") as fh:
             fh.write(md)
         os.replace(src + ".tmp", src)
-    page = render(md)
+    page = render(md, summary)
     dst = C.out_path(args.run, "report.html")
     with open(dst + ".tmp", "w", encoding="utf-8") as fh:
         fh.write(page)

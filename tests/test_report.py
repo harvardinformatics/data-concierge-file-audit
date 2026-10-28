@@ -164,7 +164,8 @@ def test_render_fills_tables(lab, tmp_path, capsys):
     names = sorted(render.TABLES)
     facts = sorted(render.FACTS)
     md = "# Audit\n\n## Areas\n\n" + "\n\n".join(
-        [f"{{{{table:{n}}}}}" for n in names] + [f"{{{{facts:{n}}}}}" for n in facts]) + "\n"
+        [f"{{{{table:{n}}}}}" for n in names] + [f"{{{{facts:{n}}}}}" for n in facts]
+        + [f"{{{{chart:{n}}}}}" for n in sorted(render.CHARTS)]) + "\n"
     with open(os.path.join(run_dir, "report.md"), "w") as fh:
         fh.write(md)
     assert render.main(["--run", run_dir]) == 0
@@ -183,6 +184,7 @@ def test_render_fills_tables(lab, tmp_path, capsys):
         page = fh.read()
     n_tables = sum("\n|" in b.split("<!-- /table -->")[0] for b in filled.split("<!-- table:")[1:])
     assert "<!--" not in page and page.count("<table>") == n_tables
+    assert page.count('<figure class="sb">') == 1 and "{{chart:" not in filled   # tiny lab draws
 
 
 def test_render_table_details():
@@ -248,6 +250,31 @@ def test_render_facts_duplicates_and_lint():
     assert any("words of prose" in w for w in render.lint(
         "## Users\n\n- **Patterns:** " + "word " * 61 + "\n", "survey"))
     assert render.lint(md, "deep") == []
+
+
+def test_render_sunburst_chart():
+    cols = ["path", "level", "status", "bytes", "files", "dirs", "newest", "last_activity",
+            "problem_dirs_below", "pipeline_work", "top_categories", "top_owner"]
+    s = {"run": {"target": "/n/lab"}, "totals": {"bytes": 1000},
+         "users": {"n": 2, "table": {"cols": ["user", "uid", "in_group", "files", "bytes", "newest"],
+                                     "rows": [["bob", 2, True, 5, 700, None],
+                                              [None, 9, False, 1, 300, None]]}},
+         "folders": {"cols": cols, "rows": [
+             [".", 0, "ok", 1000, 6, 4, None, None, 0, 0, [], "bob"],
+             ["a", 1, "ok", 600, 3, 2, "2026-01-01", None, 0, 0, [], "bob"],
+             ["a/<b>", 2, "ok", 400, 2, 1, None, None, 0, 0, [], "uid:9"],
+             ["c", 1, "unreadable", 300, 1, 1, None, None, 1, 0, [], "uid:9"]]}}
+    out, used = render.expand("# T\n\n{{chart:sunburst}}\n", s)
+    assert used == ["chart:sunburst"] and render.CHART_NOTES["sunburst"] in out
+    page = render.render(out, s)
+    svg = page.split("<svg")[1].split("</svg>")[0]
+    assert svg.count("<path") == 5                  # a, c, a/<b>, and the rest of . and of a
+    assert 'data-p="a/&lt;b&gt;"' in svg and "<b>" not in svg       # untrusted name escaped
+    assert svg.count('class="k0"') == 1 and svg.count('class="k1"') == 2   # bob, then uid:9
+    assert 'data-st="unreadable"' in svg and "1000 B" in svg
+    assert '<li data-o="bob" tabindex="0">' in page and "<!--" not in page
+    assert "<svg" not in render.render(out)         # no summary: the caption is kept instead
+    assert "Not available" in render.expand("{{chart:sunburst}}\n", {"totals": {"bytes": 1}})[0]
 
 
 def test_short_paths():

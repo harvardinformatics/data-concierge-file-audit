@@ -3,7 +3,7 @@
 A survey report is short: it maps a whole lab and says where a deep audit would pay off. `report.md` must have these sections, in this order. Any change to this file is deliberate and needs a row in `docs/decisions.md`. Keep it in sync with `summary.json` `schema_version` (currently 2).
 
 **`render.py` writes the data and the fixed sentences; you write the interpretation.**
-- Write every `{{table:NAME}}` and `{{facts:NAME}}` line exactly as shown, alone, with blank lines around it. `render.py` replaces each with a table or with bullets built from `summary.json`: totals, coverage, method, limits, and "showing N of M" lines. Never write or edit these by hand; re-running `render.py` regenerates them.
+- Write every `{{table:NAME}}`, `{{facts:NAME}}` and `{{chart:NAME}}` line exactly as shown, alone, with blank lines around it. `render.py` replaces each with a table, with bullets built from `summary.json` (totals, coverage, method, limits, and "showing N of M" lines), or with a chart (a one-line caption in `report.md`, an interactive figure in `report.html`). Never write or edit these by hand; re-running `render.py` regenerates them.
 - Copy the short caption lines (such as "Top-level folders:") as they are.
 - Your text goes only in the slots below: Key findings, the **Quota** bullet, the **Patterns** slots, Recommended deep audits, Questions, and Flagged content.
 
@@ -25,6 +25,8 @@ A survey report is short: it maps a whole lab and says where a deep audit would 
 # Storage survey: <lab or target name>
 
 <one line: target path, run date, run id, "survey mode">
+
+{{chart:sunburst}}
 
 ## Key findings
 3–5 bullets, at most 30 words each, each with a number. The only place numbers from the tables
