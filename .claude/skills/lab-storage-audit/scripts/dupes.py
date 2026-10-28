@@ -25,6 +25,7 @@ import common as C
 
 READ_BLOCK = 8 << 20
 MAX_PAIR_DIRS = 50      # groups spread over more dirs than this skip pairwise overlap
+BATCH = 10_000          # hash rows per INSERT batch
 
 
 def _read_exact(fd: int, n: int, off: int) -> bytes:
@@ -81,17 +82,30 @@ def _abs_path(target: str, d: str, d_raw, n: str, n_raw) -> bytes:
 
 
 def _pool_map(fn, jobs, workers):
-    if workers <= 1 or len(jobs) < 8:
-        return map(fn, jobs)
-    ex = ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("fork"))
-    try:
-        return list(ex.map(fn, jobs, chunksize=16))
-    finally:
-        ex.shutdown()
+    """Lazy map over an iterable of jobs; at most a few hundred in flight, so a
+    lab-sized candidate list is never held in memory."""
+    if workers <= 1:
+        yield from map(fn, jobs)
+        return
+    with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("fork")) as ex:
+        yield from ex.map(fn, jobs, chunksize=16, buffersize=workers * 4)
+
+
+def _batched_insert(cur, sql, rows) -> int:
+    """Insert from an iterator in batches; returns the number of rows with an error (r[5])."""
+    n_err, batch = 0, []
+    for r in rows:
+        n_err += bool(r[5])
+        batch.append(r)
+        if len(batch) >= BATCH:
+            cur.executemany(sql, batch)
+            batch = []
+    cur.executemany(sql, batch)
+    return n_err
 
 
 def run(db: sqlite3.Connection, target: str, min_size: int, chunk: int,
-        confirm: bool, workers: int) -> dict:
+        confirm: bool, workers: int, max_pair_dirs: int = MAX_PAIR_DIRS) -> dict:
     cur = db.cursor()
     cur.executescript("""
         DROP TABLE IF EXISTS phys;   DROP TABLE IF EXISTS hashes;
@@ -102,21 +116,21 @@ def run(db: sqlite3.Connection, target: str, min_size: int, chunk: int,
         SELECT dev, ino, size, MIN(id) AS fid, COUNT(*) AS n_paths FROM files
         WHERE kind='f' AND sensitive=0 AND size >= ? GROUP BY dev, ino""", (min_size,))
     cur.execute("CREATE INDEX phys_size ON phys(size)")
-    cand = cur.execute("""
-        SELECT p.dev, p.ino, p.size, f.dir, f.dir_raw, f.name, f.name_raw
-        FROM phys p JOIN files f ON f.id = p.fid
-        WHERE p.size IN (SELECT size FROM phys GROUP BY size HAVING COUNT(*) > 1)
-    """).fetchall()
-    C.log(f"dupes: {len(cand)} candidate files (same size, >= {min_size} B)")
+    n_cand = cur.execute("""SELECT COALESCE(SUM(n), 0) FROM
+        (SELECT COUNT(*) AS n FROM phys GROUP BY size HAVING COUNT(*) > 1)""").fetchone()[0]
+    C.log(f"dupes: {n_cand} candidate files (same size, >= {min_size} B)")
 
     cur.execute("""CREATE TABLE hashes(dev INT, ino INT, size INT, phash TEXT,
                    whole INT, fullhash TEXT, error TEXT, PRIMARY KEY(dev, ino))""")
-    jobs = [(dev, ino, size, _abs_path(target, d, dr, n, nr), chunk, False)
-            for dev, ino, size, d, dr, n, nr in cand]
-    rows = list(_pool_map(_hash_job, jobs, workers))
-    cur.executemany("INSERT INTO hashes(dev, ino, size, phash, whole, error) VALUES (?,?,?,?,?,?)",
-                    rows)
-    n_err = sum(1 for r in rows if r[5])
+    cand = db.cursor().execute("""         -- streamed: a second cursor, read while inserting
+        SELECT p.dev, p.ino, p.size, f.dir, f.dir_raw, f.name, f.name_raw
+        FROM phys p JOIN files f ON f.id = p.fid
+        WHERE p.size IN (SELECT size FROM phys GROUP BY size HAVING COUNT(*) > 1)""")
+    jobs = ((dev, ino, size, _abs_path(target, d, dr, n, nr), chunk, False)
+            for dev, ino, size, d, dr, n, nr in cand)
+    n_err = _batched_insert(
+        cur, "INSERT INTO hashes(dev, ino, size, phash, whole, error) VALUES (?,?,?,?,?,?)",
+        _pool_map(_hash_job, jobs, workers))
 
     key = "phash"
     if confirm:
@@ -161,7 +175,7 @@ def run(db: sqlite3.Connection, target: str, min_size: int, chunk: int,
 
     def flush(dirs, size):
         nonlocal wide
-        if len(dirs) > MAX_PAIR_DIRS:
+        if len(dirs) > max_pair_dirs:
             wide += 1
             return
         for a, b in combinations(sorted(dirs), 2):
@@ -189,7 +203,7 @@ def run(db: sqlite3.Connection, target: str, min_size: int, chunk: int,
     db.commit()
 
     g = cur.execute("SELECT COUNT(*), COALESCE(SUM(reclaimable),0) FROM dup_groups").fetchone()
-    return {"candidates": len(cand), "hash_errors": n_err, "groups": g[0],
+    return {"candidates": n_cand, "hash_errors": n_err, "groups": g[0],
             "reclaimable_bytes": g[1], "dir_pairs": len(overlap),
             "groups_too_wide_for_pairs": wide, "confirmed": bool(confirm),
-            "min_size": min_size, "chunk": chunk}
+            "min_size": min_size, "chunk": chunk, "max_pair_dirs": max_pair_dirs}

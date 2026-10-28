@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Create an audit run directory and plan scan shards with a bounded survey.
+"""Create an audit run directory and plan scan shards with a bounded listing.
 
 Lists at most the directories above --depth (target itself, then each level
 down to depth-1) — never walks the tree. Every directory at level --depth
-becomes a 'tree' shard (walked recursively by scan.py); directories above it
-become 'flat' shards (their own entries only; child dirs are separate shards).
+becomes a 'tree' shard (walked recursively by scan.py, which splits big ones on
+the fly); directories above it become 'flat' shards (their own entries only;
+child dirs are separate shards).
 
-Writes: <run>/run.json, <run>/shards.tsv, and audits/.current-run.
-Prints a JSON summary for the agent on stdout.
+--mode deep (default) is the full audit of a project or user dir; --mode survey
+is the quick map of a whole lab (depth 3; post.py then skips peeks and hashes
+only big files). The mode is stored in run.json and read by post.py.
+
+Writes: <run>/run.json (including the top-level listing notes), <run>/shards.tsv,
+and audits/.current-run. Prints one summary line for the agent on stdout.
 
 Example (dev target 1):
   python3 plan.py /n/holylfs05/LABS/informatics \
@@ -18,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import json
 import os
 import sys
 
@@ -26,8 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common as C  # noqa: E402
 
 
-def survey(target: str, roots: list[str], depth: int, excludes: list[str],
-           max_children: int, one_fs: bool):
+def cut_shards(target: str, roots: list[str], depth: int, excludes: list[str],
+               max_children: int, one_fs: bool):
     """Return (shards, notes). shards: list of (mode, abspath)."""
     target_dev = os.lstat(target).st_dev
     shards: list[tuple[str, str]] = []
@@ -79,8 +83,12 @@ def main(argv=None) -> int:
                     help="restrict to these subpaths of the target (repeatable)")
     ap.add_argument("--exclude", action="append", default=[], metavar="PATH",
                     help="absolute or target-relative path to skip (repeatable)")
-    ap.add_argument("--depth", type=int, default=2,
-                    help="levels listed before switching to recursive shards (default 2)")
+    ap.add_argument("--mode", choices=("deep", "survey"), default="deep",
+                    help="deep: full audit of a project/user dir (default); "
+                         "survey: quick map of a whole lab")
+    ap.add_argument("--depth", type=int,
+                    help="levels listed before switching to recursive shards "
+                         "(default 2 deep, 3 survey)")
     ap.add_argument("--max-children", type=int, default=2000,
                     help="dirs with more subdirs than this become one tree shard")
     ap.add_argument("--cross-fs", action="store_true",
@@ -127,8 +135,9 @@ def main(argv=None) -> int:
     os.makedirs(os.path.join(run_dir, "shards"), exist_ok=False)
     os.makedirs(os.path.join(run_dir, "slurm"), exist_ok=True)
 
-    shards, notes = survey(target, roots, args.depth, excludes,
-                           args.max_children, not args.cross_fs)
+    depth = args.depth if args.depth is not None else (3 if args.mode == "survey" else 2)
+    shards, notes = cut_shards(target, roots, depth, excludes,
+                               args.max_children, not args.cross_fs)
 
     with open(C.out_path(run_dir, "shards.tsv"), "w", encoding="utf-8",
               errors="surrogateescape", newline="\n") as fh:
@@ -145,19 +154,23 @@ def main(argv=None) -> int:
         "target_dev": os.lstat(target).st_dev,
         "roots": [C.rel_to(r, target) for r in roots],
         "excludes": excludes,
-        "depth": args.depth,
+        "mode": args.mode,
+        "depth": depth,
         "one_fs": not args.cross_fs,
         "n_shards": len(shards),
+        "listing": notes,
     }
     C.write_json_atomic(C.out_path(run_dir, "run.json"), run)
     with open(os.path.join(audits, ".current-run.tmp"), "w") as fh:
         fh.write(name + "\n")
     os.replace(os.path.join(audits, ".current-run.tmp"), os.path.join(audits, ".current-run"))
 
-    modes = {m: sum(1 for x, _ in shards if x == m) for m in ("flat", "tree")}
-    print(json.dumps({"run_dir": run_dir, "target": target, "excludes": excludes,
-                      "shards": len(shards), "by_mode": modes, "survey": notes},
-                     indent=2))
+    n_tree = sum(1 for m, _ in shards if m == "tree")
+    big = [n["path"] for n in notes if "note" in n]
+    print(f"run {run_dir} | mode {args.mode} | {len(shards)} shards "
+          f"({len(shards) - n_tree} flat, {n_tree} tree), depth {depth} | "
+          f"excludes: {', '.join(excludes) or 'none'}"
+          + (f" | {len(big)} dirs over --max-children: {', '.join(big[:5])}" if big else ""))
     return 0
 
 

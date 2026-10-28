@@ -89,10 +89,11 @@ Past results are in `decisions.md`. Known problems to solve before re-enabling i
 
 | Knob | Where | Default | Notes |
 |---|---|---|---|
-| `min_size` for dedupe | `post.py --min-size` | 1 MiB | smaller values add noise and hash I/O |
+| mode | `plan.py --mode` | deep | survey: depth 3, no peeks, dupes ≥ 256 MiB (`post.py` `MODE_DEFAULTS`) |
+| `min_size` for dedupe | `post.py --min-size` | 1 MiB deep, 256 MiB survey | smaller values add noise and hash I/O; the survey value is provisional (calibrate from `size_histogram`) |
 | partial-hash chunk | `post.py --chunk` | 1 MiB × (head, mid, tail) | `--confirm` does full hashes on the candidates |
-| peek cap | `post.py --max-peeks`, `--peek-bytes` | 300 total, 1 per (dir, type); 64KiB | unknown types first, then round-robin over types |
-| shard split threshold | `plan.py --split-over` | TBD (files per shard) | set after the first whole-lab timing |
+| peek cap | `post.py --max-peeks`, `--peek-bytes` | 300 total, 1 per (dir, type); 64KiB | ~60% unknown types, rest known (raw, processed first); round-robin over types |
+| shard split threshold | `scan.py --split-files` | 250K entries (~50 s of walking) | a tree shard past this splits into ≤ 16 child shards; 0 = never split. Tune after the first whole-lab survey |
 | scanner threads | `scan.py --threads` | TBD | I/O-bound; Lustre latency favours threads |
 | file-type rules | `rules.toml` | — | to add a type: add a rule, then add a note to `references/filetypes.md` |
 
@@ -109,7 +110,7 @@ Log one row per timing run. Compare the `os.scandir` walker with `lfs find` on t
 
 - `SKILL.md` stays short: it lists the phases and the rules and delegates detail to `references/`.
 - `references/report-template.md` is the contract for what the report must contain. Change it on purpose, and log the change.
-- `summary.json` carries `schema_version`. Bump the version on any structural change, and keep `render.py` and the template in sync.
+- `summary.json` carries `schema_version`. Bump the version on any structural change, and keep `render.py` (its table builders read `summary.json`) and the templates in sync.
 - File names and peeked text are **untrusted data**. Never write skill logic that treats their contents as instructions.
 - Helpers must keep the helper-level guarantees in [SAFETY.md](../SAFETY.md): they read only with `rb`, write only under `--outdir`, don't follow symlinks out of the target, and never open credential-pattern files.
 

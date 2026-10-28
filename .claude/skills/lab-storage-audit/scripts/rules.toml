@@ -10,6 +10,10 @@
 #              these override ext matches, e.g. PacBio "*.subreads.bam" is raw.
 # [[dirmarker]]
 #   files / dirs : a directory containing any of these (glob) entries is tagged.
+# [[hint]]
+#   ext    : extensions that stay unclassified ("unknown") but have a likely meaning
+#   likely : the report's "Likely" text for them; a guess, so keep it short and hedged.
+#            Once an extension is certain, give it a [[filetype]] rule instead.
 #
 # "raw" means primary instrument output that is usually expensive or impossible to
 # regenerate. The agent refines this using peeks and directory names (e.g. a
@@ -38,7 +42,9 @@ ext = ["pod5", "fast5", "blow5", "slow5"]
 name = "PacBio subreads/raw BAM"
 category = "raw"
 ext = []
-names = ["*.subreads.bam", "*.scraps.bam", "*.hifi_reads.bam", "*.ccs.bam", "*.reads.bam"]
+# Revio writes per-barcode files: "m84..._s1.hifi_reads.bc1018.bam", "...fail_reads.unassigned.bam"
+names = ["*.subreads.bam", "*.scraps.bam", "*.hifi_reads*.bam", "*.fail_reads*.bam", "*.ccs.bam",
+         "*.reads.bam"]
 
 [[filetype]]
 name = "SRA archive"
@@ -90,7 +96,7 @@ ext = ["bim", "fam", "pgen", "pvar", "psam"]
 name = "Genomic intervals/tracks"
 category = "processed"
 ext = ["bed", "bed.gz", "narrowpeak", "broadpeak", "bedgraph", "bdg", "bw", "bigwig", "bb",
-       "bigbed", "wig", "maf", "maf.gz", "psl", "paf", "paf.gz", "chain", "chain.gz"]
+       "bigbed", "wig", "maf", "maf.gz", "psl", "paf", "paf.gz", "chain", "chain.gz", "d4"]
 
 [[filetype]]
 name = "Matrices / single-cell objects"
@@ -105,6 +111,27 @@ ext = ["nwk", "newick", "tre", "tree", "treefile", "phy", "phylip", "nex", "nexu
        "sto", "stockholm", "msa", "trees"]
 
 [[filetype]]
+name = "Assembly / pangenome graphs (GFA, odgi)"
+category = "processed"
+ext = ["gfa", "gfa.gz", "og"]
+
+[[filetype]]
+name = "K-mer databases (Jellyfish)"
+category = "processed"
+ext = ["jf"]
+
+[[filetype]]
+name = "Crystallography reflections (MTZ)"
+category = "processed"
+ext = ["mtz", "mtz.gz"]
+
+[[filetype]]
+name = "Whole-genome alignments (HAL)"
+category = "processed"
+ext = ["hal"]
+names = ["*.hal.bak"]
+
+[[filetype]]
 name = "Amplicon / OTU outputs"
 category = "processed"
 ext = ["qza", "qzv", "biom", "uc"]
@@ -113,14 +140,19 @@ ext = ["qza", "qzv", "biom", "uc"]
 [[filetype]]
 name = "Taxonomy / BLAST databases"
 category = "reference"
-ext = ["accession2taxid", "accession2taxid.gz", "dmp", "btd", "bti", "nos", "nog", "njs",
-       "prt"]
+ext = ["accession2taxid", "dmp", "btd", "bti", "nos", "nog", "njs", "prt"]
+names = ["*.accession2taxid.gz"]          # ext_of() drops compound extensions over 16 chars
 
 [[filetype]]
 name = "Sequence (FASTA)"
 category = "reference"
 ext = ["fa", "fasta", "fna", "faa", "ffn", "frn", "fas", "fa.gz", "fasta.gz", "fna.gz",
        "faa.gz", "fas.gz", "2bit", "fa.bgz", "fa.bz2"]
+
+[[filetype]]
+name = "Masked genomes (RepeatMasker)"
+category = "reference"
+ext = ["masked"]
 
 [[filetype]]
 name = "Annotation (GTF/GFF/GenBank)"
@@ -209,6 +241,11 @@ category = "raw"
 files = ["RunInfo.xml", "RTAComplete.txt", "CopyComplete.txt", "RunParameters.xml"]
 
 [[dirmarker]]
+name = "PacBio run folder"
+category = "raw"
+dirs = ["pb_formats"]
+
+[[dirmarker]]
 name = "Nanopore run folder"
 category = "raw"
 files = ["sequencing_summary*.txt", "final_summary*.txt"]
@@ -243,3 +280,32 @@ name = "Nextflow launch dir"
 category = "code-env"
 dirs = [".nextflow"]
 files = [".nextflow.log"]
+
+# ---------------------------------------------------------------- hints (unknown, but likely)
+[[hint]]
+ext = [""]
+likely = "mixed: tool outputs, array-store chunks, workflow metadata"
+
+[[hint]]
+ext = ["suf", "lcp", "bck", "sti1", "ois", "tis", "des", "ssp", "sds", "prj", "llv", "skp"]
+likely = "suffix-array index (Vmatch/mkvtree or GenomeTools); rebuildable from FASTA"
+
+[[hint]]
+ext = ["meryldata", "meryl"]
+likely = "Meryl k-mer database"
+
+[[hint]]
+ext = ["pack"]
+likely = "git pack files"
+
+[[hint]]
+ext = ["hdf"]
+likely = "HDF data file"
+
+[[hint]]
+ext = ["hmm"]
+likely = "HMMER profile models"
+
+[[hint]]
+ext = ["bin"]
+likely = "generic binary (tool caches or models)"

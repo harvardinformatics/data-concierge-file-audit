@@ -29,12 +29,13 @@ CLAUDE.md        # project guidance; follows ~/.claude/CLAUDE.md; points to docs
   skills/lab-storage-audit/
     SKILL.md     # phase workflow below
     references/filetypes.md        # reading peeks; raw-data heuristics per domain
-    references/report-template.md  # fixed report sections
+    references/report-template.md  # fixed report sections (deep)
+    references/survey-template.md  # fixed report sections (survey)
     scripts/                       # helpers called only by the skill
       common.py    # safety contract: open_ro, out_path, sensitive patterns, TSV escaping, ext_of
-      plan.py      # bounded depth-2 survey -> run.json, shards.tsv (flat/tree shards; --only, --exclude)
-      scan.py      # os.scandir walk; shard i -> task i % N; process pool per task -> files/dirs .tsv.gz
-      post.py      # stages merge -> dupes -> rollup (totals, Merkle, dir dups) -> classify [-> peek, summarize: step 3]
+      plan.py      # bounded depth-2 (survey: 3) listing -> run.json, shards.tsv (flat/tree shards; --mode, --only, --exclude)
+      scan.py      # os.scandir walk; shard i -> task i % N; process pool per task -> files/dirs .tsv.gz; big shards split into children
+      post.py      # stages merge -> dupes -> rollup (totals, Merkle, dir dups) -> classify -> peek -> summarize; defaults per mode
       dupes.py     # file duplicates, hardlinks, parent-dir overlap
       classify.py  # rules.toml -> type/ext stats, raw_locations, dir_markers
       render.py    # report.md -> self-contained report.html (inline CSS, no CDN)
@@ -210,9 +211,26 @@ Policy links point to docs.rc.fas.harvard.edu instead of restating the policy.
     - SKILL.md's `lfs quota` step is redundant with `quota`.
   - Sizes, timings and token counts are in `audits/dev-notes/DEV-NOTES.md` (local, untracked).
   - Next: do dev target 2 (`Users/`) for unreadable dirs and unaccounted bytes; implement [plans/survey-mode.md](plans/survey-mode.md).
+- 2026-10-05: **Survey/deep modes implemented; cluster verification pending** (all partitions down for maintenance). On branch `survey-mode`.
+  - `plan.py --mode survey|deep`; `scan.py` splits big tree shards into child shards on the fly (`--split-files`, default 250K entries); `post.py` mode defaults (survey: no peek, dupes ≥ 256 MiB), free-space check, `temp_store=FILE` with `SQLITE_TMPDIR` on node-local disk; `dupes.py` streams candidates; summary v2 (compact tables, grouped problem dirs, sensitive split, size histogram); peek budget split; `SKILL.md` modes and sizing table; `references/survey-template.md`.
+  - Tests: `tests/test_survey.py` (split vs unsplit equality, crash resume, survey defaults, v2 shape and size, peek split, sensitive split). All tests pass.
+  - Next, when partitions return: regenerate the summary from the step 4 trial's `audit.sqlite` (no target reads) to check the v2 size; then the deep regression, `Users/`, and the whole-lab survey, per the plan's Verification section.
+- 2026-10-05: **Cluster trials of survey mode** on `<project-C>` and on `<lab-projects>` (one level up, every user's projects, tens of millions of files). Both ran end to end; the summary stayed under ~50 KB and each report took one subagent with no database queries. Figures are in `audits/dev-notes/DEV-NOTES.md` (local, untracked).
+- 2026-10-07: **Fixes from the trials' report-agent feedback.** `rules.toml` (PacBio Revio names raw, HAL processed, PacBio run-folder marker, `accession2taxid.gz` by name); folder dates use the newest file; `summary.json` one row per line, read with the Read tool, with a `capped` index; survey skips duplicate-tree detection; templates (subdirectory share instead of unaccounted, inode comparison, TiB, no backup line, survey "Data types" section); SKILL.md sizing table from measured rates; `DB_PER_GZ` 24. See decisions.md 2026-10-07.
+- 2026-10-09: **Deterministic report tables.** `render.py` fills `{{table:NAME}}` lines from `summary.json`; templates give fixed bullet slots; `summary.json` always lists every level-1 folder and the 15 largest level-2 folders, with `level`, `status` and a `last_activity` date per folder. `rules.toml` adds GFA/odgi, Jellyfish, MTZ, D4 and RepeatMasker types. See decisions.md 2026-10-09.
+- 2026-10-26: **Whole-lab survey of `<lab>`** (tens of millions of files) ran end to end on `serial_requeue`: 2 scan tasks × 8 walkers, then post. Post was preempted at start and requeued cleanly; the survey's `summary.json` fit in one Read; the report recommends deep audits. Post used one core of 4, so post now requests `-c 1` with `--workers 4` (decisions.md 2026-10-27). Figures are in `audits/dev-notes/DEV-NOTES.md` (local, untracked).
+- 2026-10-27: **Survey report made reproducible.** `render.py` now also writes the fixed sentences (`{{facts:NAME}}`), adds types, merged duplicates, small-file, recently-touched and credential-name tables, shortens paths, and lints survey prose (word budgets, numbers repeated from tables). The survey template leaves the agent only interpretation slots. Both survey reports were re-rendered in `audits/report-dev/` for comparison (decisions.md 2026-10-27). The deep template is unchanged (open item).
+- 2026-10-28: **Sunburst chart at the top of survey reports** (`{{chart:sunburst}}`): `folders` rows as rings, angle = bytes, colour = main owner (7 palette slots + "other users"), grey for bytes not in a listed subfolder; hover tooltips and branch/owner highlighting; inline SVG and script, no external resources. Compared on both survey reports and the older deep report in `audits/report-dev/sunburst-experiment/`. Limits: only as detailed as `folders` (≥ 0.1%, 3 levels); deep reports don't use it yet (decisions.md 2026-10-28).
 
 ## Open items (revisit)
-- **Survey/deep modes: designed, not yet implemented.** See [plans/survey-mode.md](plans/survey-mode.md). It covers a quick whole-lab survey, a deep audit per scope, shards that split on the fly, and a compact summary v2.
+- **Survey/deep modes: implemented 2026-10-05, cluster verification pending.** See [plans/survey-mode.md](plans/survey-mode.md) Verification steps 2–6.
+- **Deep report template** still has slots that restate its tables ("Biggest items", per-row notes). Move it to facts blocks, the merged duplicates table and the lint once the survey format is settled.
+- **Calibrate the survey's 256 MiB duplicate threshold** from the whole-lab survey's `size_histogram` (arbitrary starting point; user, 2026-10-02).
+- **Post `/scratch` high-water at lab scale**: not logged by post; the whole-lab survey's database (~0.4 GB per million files) is a lower bound. Log `/scratch` use in post if it matters.
+- **Areas detail level for a whole-lab target.** The detail table is fixed at 2 levels below the target. For a lab root, projects sit one level deeper (`Lab/projects/<user>`), so check the first whole-lab survey's table and decide whether the level should be settable per run.
+  - 2026-10-26 (user): the first whole-lab survey keeps the fixed level. The level should eventually be **inferred from the data**, not set per run, because the PI won't know a new lab's layout in advance.
+- **Per-area duplicate numbers: on hold** (user, 2026-10-07) until the lab group confirms duplicate identification works as intended. Duplicates are matched by size plus a hash of three 1 MiB slices, not by name, and some groups may be deliberate copies. After that, decide: duplicate bytes and bytes older than 2 years per `folders` row (a group spanning two areas counts in both), every top-level folder always listed, and each user's top folders.
+- **Survey has no prompt-injection screen of file names** (raised 2026-10-07; revisit in the safety-overview edit round, user). Injection suspects come only from peeks, which surveys skip, so a survey's "Flagged content" covers only the few hundred names that reach `summary.json`. Option: a cheap regex screen over all file and dir names in the summarize step, reporting paths only. Decide alongside the other SAFETY.md promises.
 - **2026-10-02: sandbox disabled for initial development (user decision).** The items below are kept for the before-release decision on whether to bring it back.
 - **Sandboxing in general (the user asked to revisit).**
   - Is the value to PIs worth the friction? The value is an OS-level read-only guarantee for improvised agent commands, no Bash network, and fewer prompts. The friction:

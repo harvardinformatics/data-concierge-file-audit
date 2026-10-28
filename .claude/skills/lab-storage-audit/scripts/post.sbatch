@@ -1,13 +1,16 @@
 #!/bin/bash
-# lab-storage-audit: merge -> dupes -> rollup -> classify into <run>/audit.sqlite.
+# lab-storage-audit: post.py stages (per the run's mode) into <run>/audit.sqlite.
 # Builds the database on node-local /scratch, then copies it back to the run dir.
+# Limits per https://docs.rc.fas.harvard.edu/kb/running-jobs/#Slurm_Partitions (or spart).
 #
 # Submit FROM THE REPO ROOT, after the scan; use afterany (not afterok) so a
 # failed scan doesn't leave this job pending forever — post.py itself refuses
 # to run if any shard is unfinished:
-#   sbatch --parsable -p test -t 0-01:00 -c 4 --mem=8G --dependency=afterany:<scan_jobid> \
+#   sbatch --parsable -p <partition> -t <time> -c <cpus> --mem=<mem> --dependency=afterany:<scan_jobid> \
 #     -o audits/<run>/slurm/%x-%j.out -e audits/<run>/slurm/%x-%j.err \
 #     .claude/skills/lab-storage-audit/scripts/post.sbatch audits/<run> [post.py options]
+# Post is single-threaded apart from hashing (I/O-bound workers): use -c 1 and pass
+# --workers 4 as a post.py option (it overrides the default of one per CPU).
 #SBATCH -J lsa-post
 #SBATCH --open-mode=append
 set -euo pipefail
@@ -27,6 +30,7 @@ fail() {   # keep post.py's more detailed sentinel if it wrote one
 trap cleanup EXIT
 trap fail ERR
 mkdir -p "$WORK"
+export SQLITE_TMPDIR="$WORK"     # SQLite sort/index temp files go to node-local disk too
 
 echo "lsa-post on $(hostname) at $(date -Is); run=$RUN work=$WORK"
 set +u; module load python; set -u

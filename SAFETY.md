@@ -7,11 +7,17 @@ This repo contains a Claude Code skill, `/lab-storage-audit`, that the FAS Infor
 ## What it does
 
 1. **Reads file metadata** under the directory you point it at (the *target*): names, sizes, modification dates, owners, and link counts. Directories you can't read are recorded by name, owner, and last-modified date only.
-2. **Reads small samples of file contents** so it can recognize file types, the way a person would open one file of each kind to see what it is.
+2. **Reads small samples of file contents** (deep audits only) so it can recognize file types, the way a person would open one file of each kind to see what it is.
    - It reads at most **64 KiB** from each of at most **300** representative files.
    - It samples one file per (directory, file type), never every file.
 3. **Finds likely duplicates.** It compares file sizes, then hashes three 1 MiB slices of each candidate (start, middle, end). A full-file hash runs only if you ask for one (`--confirm`).
-4. **Writes a report** into `audits/<run>/` inside this repo: `report.md`, `report.html`, `summary.json`, and `agent-actions.log`, a log of every command the agent ran and every file it read.
+4. **Writes a report** into `audits/<run>/` inside this repo: `report.md`, `report.html`, `summary.json`, and `agent-actions.log`, a log of every command the agent ran and every file it read. It also keeps its working database, `audit.sqlite` (the metadata above, about 0.25–0.4 GB per million files), there.
+
+### Survey and deep audits
+
+- A **survey** maps a whole lab quickly. It reads metadata (1) and checks duplicates (3) only among files of **256 MiB or more**. It reads **no content samples** (2).
+- A **deep** audit covers one project or user directory and does all of the above.
+- Both are equally read-only. A survey's database can be large for a big lab (about 0.25–0.4 GB per million files, so tens of GB for tens of millions of files), and it lives in `audits/` like everything else; delete the run folder when you're done with it.
 
 ## What it cannot do
 
