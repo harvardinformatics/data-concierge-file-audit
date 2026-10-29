@@ -23,7 +23,7 @@ If the PI doesn't name a mode, use **survey** for a lab root, or when `quota` sh
 - **Slurm commands:**
   - Every submission asks the PI first.
   - Track jobs with sentinel files. At most one `squeue`/`sacct` call per 10 minutes, and only if a sentinel is overdue.
-  - **At most 16 concurrent walkers** (array tasks running at once × CPUs per task), to keep the shared metadata server healthy. Before the first whole-lab survey on a filesystem, suggest the PI give FASRC a heads-up.
+  - **At most 16 concurrent walkers** (array tasks running at once × walkers per task), to keep the shared metadata server healthy. Before the first whole-lab survey on a filesystem, suggest the PI give FASRC a heads-up.
 
 ## Phases
 
@@ -36,21 +36,21 @@ If the PI doesn't name a mode, use **survey** for a lab root, or when `quota` sh
 2. **Scan and post** (SLURM)
    - Production uses `serial_requeue`; dev uses `test` or a partition the user names. Take limits from https://docs.rc.fas.harvard.edu/kb/running-jobs/#Slurm_Partitions, or from `spart` for partitions not listed there. Never paste a partition maximum in as a request.
    - Size the jobs from the `quota` file count with the table below, with about 3× margin on time. Big subtrees split into child shards on the fly, so more walkers help up to the cap of 16.
-   - **Cores.** Scan walkers wait on Lustre, not CPU (~25% CPU each), so walkers are about requests in flight; on `serial_requeue` use tasks of ≤ 8 CPUs (e.g. `--array=0-1 -c 8`). Post is single-threaded apart from hashing, whose workers also wait on I/O: request **`-c 1`** and pass `--workers 4` after the run dir. Extra post cores sit idle, and FASRC flags such jobs.
+   - **Cores.** Scan walkers wait on Lustre, not CPU (~10–25% CPU each), so walkers are about requests in flight, not cores: request **`-c 2` per task and pass `--workers 8`** after the run dir (8 walkers per task; a survey uses `--array=0-1`, a deep audit one task, `--array=0`). Post is single-threaded apart from hashing, whose workers also wait on I/O: request **`-c 1`** and pass `--workers 4` after the run dir. Extra cores sit idle, and FASRC flags such jobs.
    - Show the PI the exact commands and resources, then submit them using the usage lines at the top of `scan_array.sbatch` and `post.sbatch`. Post depends on the scan with `afterany`, and picks its stages from the run's mode.
 
    | Per million files (approximate, from dev runs; slower for trees with many dirs or tiny files) | |
    |---|---|
-   | walking | ~210–430 walker-seconds (16 walkers: ~15–30 s); size from the slow end |
+   | walking | ~210–430 walker-seconds (16 walkers: ~15–30 s); size from the slow end. Trees with about as many dirs as files (zarr stores, per-sample dirs) are slower: ~1,400 walker-s per million files (a 2.2M-file project with 1.3M dirs: 11 min on 8 walkers) |
    | post, survey | ~30 s |
-   | post, deep | ~30 s, plus hashing: ~3 min per 15K duplicate candidates (files ≥ 1 MiB that share a size) at 4 workers; a multi-million-file project dir had about that many |
-   | post memory | not per million: ~2.4–4.7 GB peak on surveys of tens of millions of files; request ~2.5× (e.g. 12G) within the partition's limits |
-   | scan memory | not per million: up to ~6 GB for an 8-walker task on tens of millions of files; request 12G per task |
+   | post, deep | ~30 s, plus hashing: ~3–4 min per 15K duplicate candidates (files ≥ 1 MiB that share a size) at 4 workers. Candidates vary a lot: 15K in a 6.8M-file project, 223K in a 2.2M-file one (55 min of hashing) |
+   | post memory | not per million: ~2.4–4.7 GB peak on surveys of tens of millions of files (request 12G); ~3.1 GB on a 2.2M-file deep audit (request 8G) |
+   | scan memory | not per million: up to ~6 GB for an 8-walker task on tens of millions of files (request 12G per task); ~2.4 GB on a 2.2M-file project (request 6G) |
    | `audit.sqlite` | ~0.25–0.4 GB in `audits/<run>/`; post builds it on node-local `/scratch` first, so that much again there. Post refuses to start if either place has less than ~24× the gzipped shard files free |
 3. **Wait** until `audits/<run>/post.DONE` or `post.FAILED` exists: a background `until [ -e …DONE ] || [ -e …FAILED ]; do sleep 60; done`.
    - On `FAILED`, read the sentinel JSON and `audits/<run>/slurm/*.err`, explain the failure, and stop.
 4. **Interpret**
-   - Read `audits/<run>/summary.json` in full with the Read tool, not with Bash or scripts. It's capped by design and has one table row per line (schema 2: tables are `{cols, rows}`, dates `YYYY-MM-DD`). If one Read is too large, read it in two parts with `offset`/`limit`. The template's "Reading `summary.json`" notes explain `capped`, dates and units.
+   - Read `audits/<run>/summary.json` in full with the Read tool, not with Bash or scripts. It's capped by design and has one table row per line (schema 3: tables are `{cols, rows}`, dates `YYYY-MM-DD`). If one Read is too large, read it in two parts with `offset`/`limit`. The template's "Reading `summary.json`" notes explain `capped`, dates and units.
    - Deep only: read `peeks.jsonl` with [references/filetypes.md](references/filetypes.md) to work out what the `unknown` types are and whether "raw" really is raw.
    - For drill-downs, query `audit.sqlite` read-only with `python3 -c "import sqlite3; …"` using `?mode=ro` URIs. Keep the output small, with `LIMIT`.
 5. **Report**

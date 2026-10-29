@@ -66,14 +66,33 @@ th,td{border:1px solid var(--line);padding:5px 9px;text-align:left;vertical-alig
 th{background:var(--soft)}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 blockquote{margin:.8em 0;padding:.4em 1em;border-left:3px solid var(--accent);background:var(--soft)}
 hr{border:0;border-top:1px solid var(--line);margin:2em 0}
-nav{font-size:.92em;color:var(--muted);margin-bottom:1.5em}nav a{margin-right:.9em;white-space:nowrap}
+nav{display:flex;flex-wrap:wrap;gap:.25em .9em;font-size:.92em;color:var(--muted);margin-bottom:1.5em}nav a{white-space:nowrap}
+details>summary{display:block;cursor:pointer;list-style:none}details>summary::-webkit-details-marker{display:none}
+details>summary>h2::before{content:"";display:inline-block;width:.42em;height:.42em;margin:0 .55em .18em .1em;
+ border:solid var(--muted);border-width:0 2px 2px 0;transform:rotate(-45deg);transition:transform .12s}
+details[open]>summary>h2::before{transform:rotate(45deg)}details:not([open])>summary>h2{color:var(--muted)}
+details>summary:hover>h2{color:var(--accent)}
+details.hl{border-left:3px solid var(--accent);background:var(--soft);padding:0 16px 6px;
+ border-radius:0 6px 6px 0;margin:1.4em 0}details.hl>summary>h2{border-bottom:0;margin-top:.6em}
+.gl{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:1em 0 1.4em}
+.gl div{border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.gl b{display:block;font-size:1.45em;font-weight:600;line-height:1.2}
+.gl span{display:block;font-size:.88em}.gl small{display:block;color:var(--muted);font-size:.8em}
+.ob{margin:.6em 0 1.2em;font-size:.88em}.ob ul{list-style:none;padding:0;margin:0 0 8px;display:flex;
+ flex-wrap:wrap;gap:4px 14px}.ob li{display:flex;align-items:center;gap:6px}
+.ob .r{display:grid;grid-template-columns:minmax(120px,28%) 1fr 72px;gap:10px;align-items:center;
+ padding:2px 0}.ob .r code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ob i{width:10px;height:10px;border-radius:50%;flex:none}.ob .bar{display:flex;height:14px;border-radius:3px;overflow:hidden;background:var(--kr)}
+.ob .bar s{display:block;height:100%;border-right:1px solid var(--bg)}.ob .bar s:hover{filter:brightness(1.15)}
+.ob .n{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.sb i.hx,.ob i.hx{background:repeating-linear-gradient(45deg,var(--muted) 0 2px,transparent 2px 5px)}
 .sb{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:12px 32px;margin:1em 0 1.6em}
 .sb svg{width:100%;max-width:520px;height:auto;flex:1 1 320px}
 .sb path{stroke:var(--bg);stroke-width:1;transition:opacity .1s}.sb.sb-hl path{opacity:.22}
 .sb.sb-hl path.on{opacity:1}.sb text{text-anchor:middle;fill:var(--fg)}
 .sb .sb-c{font-size:22px;font-weight:600}.sb .sb-l{font-size:13px;fill:var(--muted)}
-.sb .k0{fill:var(--k0)}.sb i.k0{background:var(--k0)}.sb .k1{fill:var(--k1)}.sb i.k1{background:var(--k1)}.sb .k2{fill:var(--k2)}.sb i.k2{background:var(--k2)}.sb .k3{fill:var(--k3)}.sb i.k3{background:var(--k3)}.sb .k4{fill:var(--k4)}.sb i.k4{background:var(--k4)}.sb .k5{fill:var(--k5)}.sb i.k5{background:var(--k5)}.sb .k6{fill:var(--k6)}.sb i.k6{background:var(--k6)}
-.sb .ko{fill:var(--ko)}.sb i.ko{background:var(--ko)}.sb .kr{fill:var(--kr)}.sb i.kr{background:var(--kr)}
+.sb .k0{fill:var(--k0)}.sb i.k0,.ob .k0{background:var(--k0)}.sb .k1{fill:var(--k1)}.sb i.k1,.ob .k1{background:var(--k1)}.sb .k2{fill:var(--k2)}.sb i.k2,.ob .k2{background:var(--k2)}.sb .k3{fill:var(--k3)}.sb i.k3,.ob .k3{background:var(--k3)}.sb .k4{fill:var(--k4)}.sb i.k4,.ob .k4{background:var(--k4)}.sb .k5{fill:var(--k5)}.sb i.k5,.ob .k5{background:var(--k5)}.sb .k6{fill:var(--k6)}.sb i.k6,.ob .k6{background:var(--k6)}
+.sb .ko{fill:var(--ko)}.sb i.ko,.ob .ko{background:var(--ko)}.sb .kr{fill:var(--kr)}.sb i.kr{background:var(--kr)}
 .sb ul{list-style:none;margin:0;padding:0;font-size:.9em;min-width:220px}
 .sb li{display:flex;align-items:center;gap:8px;padding:3px 6px;border-radius:4px}
 .sb li[data-o]:hover,.sb li[data-o]:focus{background:var(--soft);outline:none}
@@ -250,14 +269,49 @@ def charts_for(md: str, summary: dict | None) -> dict[str, str]:
     return out
 
 
+# sections that start collapsed, by title prefix; any section that is only "None…" does too
+COLLAPSED = {"deep": ("Scope and method", "Storage usage", "Pipeline intermediates",
+                      "Unreadable and stale directories", "Appendix")}
+HIGHLIGHT = ("Key findings", "Organization observations")    # drawn as call-outs
+
+# opens a section when its nav link is followed, toggles all, and opens all before printing
+_SECTIONS_JS = """(function(){var ds=[].slice.call(document.querySelectorAll('main>details')),
+x=document.getElementById('xall');function op(h){var t=h&&h.length>1&&document.getElementById(h.slice(1)),
+d=t&&t.closest('details');if(d)d.open=true}document.addEventListener('click',function(e){
+var a=e.target.closest('a[href^="#"]');if(a&&a!==x)op(a.getAttribute('href'))});op(location.hash);
+if(x)x.addEventListener('click',function(e){e.preventDefault();var o=ds.some(function(d){return !d.open});
+ds.forEach(function(d){d.open=o});x.textContent=o?'Collapse all':'Expand all'});
+window.addEventListener('beforeprint',function(){ds.forEach(function(d){d.open=true})})})();"""
+
+
+def _sections(body: str, collapse: tuple) -> tuple[str, int]:
+    """Wrap each <h2> section of a rendered body in <details>, open unless its title starts
+    with one of `collapse` or its whole body is one "None…" paragraph. Returns (html, n closed)."""
+    parts = re.split(r'^(?=<h2 id=")', body, flags=re.M)
+    out, shut_n = [parts[0]], 0
+    for part in parts[1:]:
+        head, _, rest = part.partition("\n")
+        title = html.unescape(re.sub(r"<[^>]+>", "", head))
+        shut = title.startswith(collapse) or bool(re.fullmatch(r"<p>None\b[^<]*</p>", rest.strip()))
+        shut_n += shut
+        cls = ' class="hl"' if title.startswith(HIGHLIGHT) else ""
+        out.append(f"<details{cls}{'' if shut else ' open'}><summary>{head}</summary>\n"
+                   f"{rest.rstrip()}\n</details>\n")
+    return "".join(out), shut_n
+
+
 def render(md: str, summary: dict | None = None) -> str:
     title, body, toc = to_html(md, charts_for(md, summary))
+    mode = summary.get("mode", "deep") if summary else None
+    body, shut = _sections(body, COLLAPSED.get(mode, ()))
     nav = ("<nav>" + "".join(f'<a href="#{h}">{html.escape(t)}</a>' for h, t in toc)
+           + ('<a href="#" id="xall">Expand all</a>' if shut else "")
            + "</nav>") if len(toc) > 2 else ""
+    script = f"<script>{_SECTIONS_JS}</script>" if toc else ""
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">'
             f"<title>{html.escape(title)}</title><style>{CSS}</style></head>"
-            f"<body><main>{nav}{body}</main></body></html>\n")
+            f"<body><main>{nav}{body}</main>{script}</body></html>\n")
 
 
 # ------------------------------------------------------------- tables from summary.json
@@ -427,6 +481,77 @@ def t_users(s, limit=15):
             for r in _rows(u["table"])[:limit]]
     return _md(["User", "In group", "Size", "Files", "Newest file", "Note"], body) + _showing(
         len(body), u["n"], "users")
+
+
+MIXED = 0.8      # a folder is mixed when no file owner holds this share of its bytes
+
+
+def _owner_shares(r: dict) -> list[tuple[str, int]]:
+    """[(owner, bytes)] of a folders row, largest first, 'others' last (v3 summaries)."""
+    own = [(u, b) for u, b in r.get("owners") or []]
+    if not own and r.get("top_owner"):
+        own = [(r["top_owner"], r["bytes"])]
+    if r.get("other_owners_bytes"):
+        own.append(("others", r["other_owners_bytes"]))
+    return own
+
+
+def _is_mixed(r: dict) -> bool:
+    own = _owner_shares(r)
+    tot = sum(b for _, b in own)
+    return bool(tot) and len(own) > 1 and own[0][1] / tot < MIXED
+
+
+def _dir_owner_differs(r: dict) -> bool:
+    return bool(r.get("dir_owner") and r.get("top_owner") and r["dir_owner"] != r["top_owner"])
+
+
+def _shares_text(r: dict) -> str:
+    own = _owner_shares(r)
+    tot = sum(b for _, b in own)
+    def pct(b):
+        x = 100 * b / tot
+        return "<1%" if 0 < x < 0.5 else f"{round(x)}%"
+    return ", ".join(f"{u} {pct(b)}" for u, b in own) if tot else ""
+
+
+def _mixed_rows(s) -> list[dict]:
+    """The deepest listed folders with mixed file owners or a folder owner who isn't the
+    main file owner: a flagged folder with a flagged listed subfolder is left out."""
+    flagged = [r for r in _rows(s["folders"]) if _is_mixed(r) or _dir_owner_differs(r)]
+    paths = [r["path"] for r in flagged]
+    deep = [r for r in flagged if not any(
+        q.startswith(r["path"] + "/") or (r["path"] == "." and q != ".") for q in paths)]
+    return sorted(deep, key=lambda r: (-r["bytes"], r["path"]))
+
+
+def t_owners(s, limit=15):
+    """Who owns what: only a file's owner can move or change it."""
+    u, tb = s["users"], s["totals"]["bytes"]
+    cut = _cutoff(s, 2)
+
+    def note(r):
+        out = [] if r["in_group"] else ["not in group" if r["user"] else "deleted account"]
+        if cut and r["newest"] and r["newest"] < cut:
+            out.append("no new files in 2+ years")
+        return "; ".join(out)
+
+    def where(r):
+        return ", ".join(f"{_code(p)} {_pct(b, r['bytes'])}" for p, b in r.get("top_folders") or [])
+    body = [[r["user"] or f"(deleted, uid {r['uid']})", C.human_bytes(r["bytes"]),
+             _pct(r["bytes"], tb), _n(r["files"]), where(r), r["newest"] or "", note(r)]
+            for r in _rows(u["table"])[:limit]]
+    return _md(["Owner", "Size", "Share", "Files", "Main folders (share of theirs)",
+                "Newest file", "Note"], body) + _showing(len(body), u["n"], "owners")
+
+
+def t_mixed_folders(s, limit=12):
+    rows = _mixed_rows(s)
+    body = [[name, C.human_bytes(r["bytes"]), _shares_text(r),
+             (r.get("dir_owner") or "") + (" (differs)" if _dir_owner_differs(r) else "")]
+            for name, r in zip(_paths(r["path"] for r in rows[:limit]), rows[:limit])]
+    return _md_or_none(["Folder", "Size", "File owners", "Folder owner"], body) + _showing(
+        len(body), len(rows), "folders")
 
 
 def _frac(x) -> str:
@@ -763,7 +888,84 @@ FACTS = {name[2:]: fn for name, fn in globals().items() if name.startswith("f_")
 # of the dataviz skill's validated categorical palette (--k0..--k6 in CSS); a sunburst can
 # put any two owners side by side, so hover and the legend highlight carry identity too.
 N_SLOTS = 7
-CHART_NOTES = {"sunburst": "*Figure: folder sizes by main owner (interactive in report.html).*"}
+
+
+def _glance(s) -> list[tuple[str, str, str]]:
+    """(value, label, detail) for the at-a-glance row; a tile whose data is missing is left out."""
+    t, tb = s["totals"], s["totals"]["bytes"] or 1
+    out = [(C.human_bytes(t["bytes"]), "scanned", f"{_n(t['files'])} files, {_n(t['dirs'])} folders")]
+    tiles = (
+        lambda: (C.human_bytes(s["duplicates"]["reclaimable_bytes"]), "likely duplicate copies",
+                 f"{_pct(s['duplicates']['reclaimable_bytes'], tb)} of the total"),
+        lambda: (C.human_bytes(dict((r["category"], r["bytes"]) for r in _rows(s["by_category"]))
+                               .get("raw", 0)), "raw data",
+                 f"in {_n(s['raw_locations']['dirs'])} folders"),
+        lambda: (_n(s["users"]["n"]), "owner" if s["users"]["n"] == 1 else "owners",
+                 _plural(len(_mixed_rows(s)), "folder", "folders") + " with mixed ownership"),
+        lambda: (lambda b: (_pct(b, tb), "unchanged 2+ years", C.human_bytes(b)))(
+            sum(r["bytes"] for r in _rows(s["age_by_year"])
+                if r["year"] and int(r["year"]) <= int(s["generated"][:4]) - 2)),
+    )
+    for tile in tiles:
+        try:
+            out.append(tile())
+        except (KeyError, TypeError, ValueError):
+            pass
+    return out
+
+
+# report.md form of each chart: the HTML is drawn into report.html only
+CHART_MD = {
+    "sunburst": lambda s: ["*Figure: folder sizes by main owner; hatched where no owner holds "
+                           f"{round(100 * MIXED)}% (interactive in report.html).*"],
+    "owners": lambda s: ["*Figure: owner shares of the largest and the mixed folders "
+                         "(in report.html).*"],
+    "glance": lambda s: [f"- **{v}** {label} ({d})" for v, label, d in _glance(s)],
+}
+
+
+def c_glance(s) -> str:
+    esc = html.escape
+    return '<div class="gl">' + "".join(
+        f"<div><b>{esc(v)}</b><span>{esc(label)}</span><small>{esc(d)}</small></div>"
+        for v, label, d in _glance(s)) + "</div>"
+
+
+def _owner_slots(s, shown: set) -> tuple[list, dict]:
+    """(owners shown, in users-table order; owner -> colour slot). Slots follow the whole
+    users table (bytes owned), so an owner has the same colour in every chart."""
+    every = [u["user"] or f"uid:{u['uid']}" for u in _rows(s["users"]["table"])] \
+        if "users" in s else []
+    every += sorted(u for u in shown - set(every) if u)
+    slot = {u: i for i, u in enumerate(every[:N_SLOTS])}
+    return [u for u in every if u in shown], slot
+
+
+def c_owners(s, limit: int = 16) -> str:
+    """100% stacked bars of owner shares: top-level folders, then mixed folders."""
+    rows = _rows(s["folders"])
+    top = sorted((r for r in rows if r["level"] == 1), key=lambda r: (-r["bytes"], r["path"]))
+    pick = top[:limit // 2] + [r for r in _mixed_rows(s) if r["level"] != 1]
+    pick = pick[:limit]
+    if not pick:
+        raise KeyError("folders below the top level")
+    order, slot = _owner_slots(s, {u for r in pick for u, _ in _owner_shares(r) if u != "others"})
+    esc = lambda x: html.escape(str(x), quote=True)  # noqa: E731
+    out = ['<figure class="ob"><ul>']
+    out += [f'<li><i class="k{slot[u]}"></i>{esc(u)}</li>' for u in order if u in slot]
+    if any(u not in slot for u in order) or any(u == "others" for r in pick for u, _ in _owner_shares(r)):
+        out.append('<li><i class="ko"></i>other owners</li>')
+    out.append("</ul>")
+    for name, r in zip(_paths(r["path"] for r in pick), pick):
+        own = _owner_shares(r)
+        tot = sum(b for _, b in own) or 1
+        segs = "".join(f'<s class="{f"k{slot[u]}" if u in slot else "ko"}" style="width:'
+                       f'{100 * b / tot:.2f}%" title="{esc(u)}: {esc(C.human_bytes(b))} '
+                       f'({esc(_pct(b, tot))})"></s>' for u, b in own if b)
+        out.append(f'<div class="r"><code title="{esc(r["path"])}">{esc(name.strip("`"))}</code>'
+                   f'<div class="bar">{segs}</div><span class="n">{esc(C.human_bytes(r["bytes"]))}'
+                   "</span></div>")
+    return "".join(out) + "</figure>"
 
 _SB_JS = """(function(){var f=document.currentScript.previousElementSibling,
 t=f.querySelector('.sb-tip'),g=[].slice.call(f.querySelectorAll('path[data-p]'));
@@ -776,6 +978,7 @@ function show(s,e){var d=s.dataset;t.textContent='';var h=document.createElement
 h.textContent=d.n;t.appendChild(h);var c=document.createElement('code');c.textContent=d.p;t.appendChild(c);
 row(d.b,d.k?'not itemised: files directly in the folder, or folders too small to list':'('+d.pc+' of total)');
 if(!d.k){row(d.f,'files, '+d.d+' folders');row(d.o||'unknown','owns the most bytes');
+if(d.os)row(d.os,'file owners');if(d.dw)row(d.dw,'owns the folder itself');
 if(d.nw)row(d.nw,'newest file'+(d.la?', last activity '+d.la:''));if(d.st)row(d.st,'status')}
 t.style.display='block';var r=f.getBoundingClientRect(),x=e.clientX-r.left+14,y=e.clientY-r.top+14;
 if(x+t.offsetWidth>r.width)x=Math.max(0,x-t.offsetWidth-28);t.style.left=x+'px';t.style.top=y+'px'}
@@ -850,10 +1053,7 @@ def c_sunburst(s, size: int = 600, min_angle: float = 0.002) -> str:
 
     # owner -> colour slot, by bytes owned in the whole target (users table order)
     shown = {r.get("top_owner") for _, _, _, r in segs if not r.get("rest")}
-    order = [u["user"] or f"uid:{u['uid']}" for u in _rows(s["users"]["table"])] \
-        if "users" in s else []
-    order = [u for u in order if u in shown] + sorted(u for u in shown - set(order) if u)
-    slot = {u: i for i, u in enumerate(order[:N_SLOTS])}
+    order, slot = _owner_slots(s, shown)
     owned = {(u["user"] or f"uid:{u['uid']}"): u["bytes"]
              for u in _rows(s["users"]["table"])} if "users" in s else {}
 
@@ -864,7 +1064,16 @@ def c_sunburst(s, size: int = 600, min_angle: float = 0.002) -> str:
     esc = lambda x: html.escape(str(x), quote=True)  # noqa: E731
     out = [f'<svg viewBox="{-size / 2} {-size / 2} {size} {size}" role="img" '
            f'aria-label="Sunburst chart of folder sizes, coloured by the user who owns the most '
-           f'bytes in each folder. The Areas tables list the same folders.">']
+           f'bytes in each folder, hatched where ownership is mixed. The folder tables list '
+           f'the same folders.">']
+    hatched = sorted({f"k{slot[r['top_owner']]}" if r.get("top_owner") in slot else "ko"
+                      for _, _, _, r in segs if not r.get("rest") and _is_mixed(r)})
+    if hatched:                                      # one pattern per colour: fill + light stripes
+        out.append("<defs>" + "".join(
+            f'<pattern id="sbh-{c}" patternUnits="userSpaceOnUse" width="7" height="7" '
+            f'patternTransform="rotate(45)"><rect width="7" height="7" style="fill:var(--{c})"/>'
+            f'<rect width="2.5" height="7" style="fill:var(--bg);opacity:.55"/></pattern>'
+            for c in hatched) + "</defs>")
     for ring, a0, a1, r in segs:
         name = r["path"].rsplit("/", 1)[-1] if r["path"] != "." else r["path"]
         d = _arc(hole + (ring - 1) * w, hole + ring * w, a0, a1)
@@ -879,19 +1088,24 @@ def c_sunburst(s, size: int = 600, min_angle: float = 0.002) -> str:
             attrs |= {"pc": _pct(r["bytes"], tb), "f": _n(r["files"]), "d": _n(r["dirs"]),
                       "o": o or "", "nw": r.get("newest") or "",
                       "la": r.get("last_activity") or "",
-                      "st": "" if r.get("status", "ok") == "ok" else r["status"]}
+                      "st": "" if r.get("status", "ok") == "ok" else r["status"],
+                      "os": _shares_text(r) if len(_owner_shares(r)) > 1 else "",
+                      "dw": r["dir_owner"] if _dir_owner_differs(r) else ""}
             tip = f"{r['path']}: {attrs['b']}, {_pct(r['bytes'], tb)}, owner {o or 'unknown'}"
         data = "".join(f' data-{k}="{esc(v)}"' for k, v in attrs.items() if v != "")
-        out.append(f'<path class="{cls}" d="{d}"{data}><title>{esc(tip)}</title></path>')
+        fill = f' style="fill:url(#sbh-{cls})"' if not r.get("rest") and _is_mixed(r) else ""
+        out.append(f'<path class="{cls}"{fill} d="{d}"{data}><title>{esc(tip)}</title></path>')
     label = centre["path"] or os.path.basename(s.get("run", {}).get("target", "")) or "target"
     label = os.path.basename(s.get("run", {}).get("target", "")) if label == "." else label
     out.append(f'<text class="sb-c" y="-4">{C.human_bytes(centre["bytes"])}</text>'
                f'<text class="sb-l" y="16">{esc(_clip(label, 24))}</text></svg>')
 
     items = [(f"k{slot[u]}", u, C.human_bytes(owned[u]) if u in owned else "")
-             for u in order[:N_SLOTS]]
-    if len(order) > N_SLOTS or None in shown:
+             for u in order if u in slot]
+    if any(u not in slot for u in order) or None in shown:
         items.append(("ko", "other users", ""))
+    if hatched:
+        items.append(("hx", f"no owner holds {round(100 * MIXED)}%", ""))
     items.append(("kr", "not itemised", ""))
     legend = "".join(
         (f'<li data-o="{esc(u)}" tabindex="0">' if c.startswith("k") and c[1:].isdigit()
@@ -912,9 +1126,11 @@ REQUIRED = {
                "facts:types", "types", "raw_data", "unknown_types", "sensitive",
                "facts:duplicates", "duplicates", "facts:unreadable", "unreadable",
                "size_histogram", "by_category"),
-    "deep": ("areas_top", "areas_detail", "users", "raw_data", "big_duplicates", "dir_trees",
-             "dir_overlap", "pipeline_workdirs", "unreadable", "age", "by_category",
-             "unknown_types"),
+    "deep": ("chart:glance", "chart:sunburst", "chart:owners", "owners", "mixed_folders",
+             "areas_top", "areas_detail", "small_files", "touched_old", "raw_data",
+             "facts:duplicates", "duplicates", "dir_trees", "facts:scope", "facts:storage",
+             "facts:unreadable", "unreadable", "facts:age", "age", "facts:pipeline",
+             "pipeline_workdirs", "by_category", "unknown_types"),
 }
 _MARK = re.compile(r"^\{\{(table|facts|chart):([a-z_]+)\}\}\s*$")
 _REGION = re.compile(r"^<!-- (table|facts|chart):([a-z_]+) -->$")
@@ -943,8 +1159,8 @@ def expand(md: str, summary: dict) -> tuple[str, list[str]]:
                 i += 1
         try:
             block = _KINDS[kind][name](summary)
-            if kind == "chart":                     # the SVG is drawn into report.html only
-                block = [CHART_NOTES[name]]
+            if kind == "chart":                     # the HTML is drawn into report.html only
+                block = CHART_MD[name](summary)
         except KeyError as ex:                      # section absent from this summary
             block = [f"Not available: `summary.json` has no {ex}."]
         out += [f"<!-- {kind}:{name} -->", *block, f"<!-- /{kind} -->"]
@@ -958,8 +1174,13 @@ BUDGETS = {"survey": {"Key findings": 160, "Scope and method": 20, "Storage usag
                       "Areas": 90, "Users": 60, "Age": 60, "Data types": 90,
                       "Big duplicates": 90, "Unreadable directories": 60,
                       "Recommended deep audits": 60, "Questions for the PI": 140,
-                      "Flagged content": 40, "Appendix": 30}}
-_FREE = ("Key findings", "Recommended deep audits", "Questions for the PI")   # may repeat numbers
+                      "Flagged content": 40, "Appendix": 30},
+           "deep": {"Key findings": 160, "Organization observations": 200, "Ownership": 90,
+                    "Per-folder overview": 90, "Raw data": 90, "Duplicates": 90,
+                    "Flagged content": 40, "Scope and method": 20, "Storage usage": 60,
+                    "Unreadable and stale": 60, "Pipeline intermediates": 40, "Appendix": 120}}
+_FREE = ("Key findings", "Recommended deep audits", "Questions for the PI",   # may repeat numbers
+         "Organization observations")
 _NUMS = re.compile(r"\d[\d,]*(?:\.\d+)?\s?(?:[KMGTP]iB|%)|\d{1,3}(?:,\d{3})+")
 
 

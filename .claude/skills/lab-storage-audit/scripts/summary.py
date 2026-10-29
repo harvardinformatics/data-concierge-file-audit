@@ -27,7 +27,7 @@ from collections import Counter, defaultdict
 
 import common as C
 
-SUMMARY_VERSION = 2
+SUMMARY_VERSION = 3
 WARN_BYTES = 50_000
 FOLDER_DEPTH = {"deep": 2, "survey": 3}      # folder rows go this many levels below each root
 MAX_LEVEL1 = 60                              # level-1 folders always listed (the rest summed)
@@ -182,9 +182,9 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
         return None
 
     cand = []
-    for path, depth, status, nf, nb, nd, newest, active, probs in cur.execute(
+    for path, depth, status, nf, nb, nd, newest, active, probs, duid in cur.execute(
             """SELECT path, depth, status, files_total, bytes_total, dirs_total, newest_mtime,
-                      activity_mtime, problem_dirs_below FROM dirs WHERE depth <= ?""",
+                      activity_mtime, problem_dirs_below, uid FROM dirs WHERE depth <= ?""",
             (max(root_depth.values()) + folder_depth,)):
         lv = level(path, depth)
         if lv is None or lv > folder_depth:
@@ -192,7 +192,7 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
         nb, nf = nb or 0, nf or 0
         if lv <= 2 or nb >= tb // 1000 or nf >= tf // 1000:
             cand.append((max(nb / tb, nf / tf), path, lv, status, nb, nf, nd, newest, active,
-                         probs))
+                         probs, duid))
     by_bytes = sorted(cand, key=lambda c: (-c[4], c[1]))
     level1 = [c for c in by_bytes if c[2] == 1]
     forced = level1[:MAX_LEVEL1] + [c for c in by_bytes if c[2] == 2][:DETAIL_ROWS]
@@ -214,15 +214,29 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
                 if a in folders:
                     folders[a]["cat"][cat] += b
                     folders[a]["own"][uid] += b
+    # owners: who holds the bytes (only a file's owner can move or change it). The top 3
+    # file owners with their bytes when there is more than one, plus the rest summed; and
+    # dir_owner, the folder's own owner (renaming or moving needs write access to it).
     frows = []
+    user_folders: dict = defaultdict(list)          # uid -> [(bytes, path)] at level 1
     for path, f in folders.items():
-        lv, status, nb, nf, nd, newest, active, probs = f["row"]
+        lv, status, nb, nf, nd, newest, active, probs, duid = f["row"]
         cats = sorted(f["cat"].items(), key=lambda x: -x[1])[:3]
-        top = max(f["own"].items(), key=lambda x: x[1], default=(None, 0))[0]
+        own = sorted(f["own"].items(), key=lambda x: (-x[1], x[0]))
+        top = own[0][0] if own else None
+        if lv == 1:
+            for u, b in own:
+                user_folders[u].append((b, path))
         frows.append([path, lv, status, nb, nf, nd, _date(newest), _date(active), probs,
                       int(in_work(path)), [[c, b] for c, b in cats],
-                      None if top is None else who(top)])
+                      None if top is None else who(top),
+                      [[who(u), b] for u, b in own[:3]] if len(own) > 1 else [],
+                      sum(b for _, b in own[3:]), None if duid is None else who(duid)])
     frows.sort(key=lambda r: r[0])
+    for r in users["table"]["rows"]:                # each user's 3 biggest top-level folders
+        r.append([[p, b] for b, p in sorted(user_folders.get(r[1], []),
+                                            key=lambda x: (-x[0], x[1]))[:3]])
+    users["table"]["cols"].append("top_folders")
 
     out = {
         "schema_version": SUMMARY_VERSION,
@@ -238,7 +252,8 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
         "users": users,
         "folders": _table(["path", "level", "status", "bytes", "files", "dirs", "newest",
                            "last_activity", "problem_dirs_below", "pipeline_work",
-                           "top_categories", "top_owner"], frows),
+                           "top_categories", "top_owner", "owners", "other_owners_bytes",
+                           "dir_owner"], frows),
         "pipeline_workdirs": workdirs,
         "age_by_year": _table(["year", "files", "bytes"], cur.execute(
             """SELECT strftime('%Y', mtime, 'unixepoch') AS year, COUNT(*), SUM(size)
@@ -306,8 +321,9 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
         out["peeks"] = {
             "file": "peeks.jsonl",
             "n": cur.execute("SELECT COUNT(*) FROM peeks").fetchone()[0],
-            "by_format": dict(cur.execute(
-                "SELECT format, COUNT(*) FROM peeks GROUP BY format ORDER BY 2 DESC")),
+            "by_format": dict(cur.execute(              # a peek that failed has no format
+                """SELECT COALESCE(format, 'unreadable'), COUNT(*) FROM peeks GROUP BY 1
+                   ORDER BY 2 DESC""")),
             "by_category": dict(cur.execute(
                 """SELECT CASE WHEN type_key LIKE 'unknown:%' THEN 'unknown' ELSE 'known' END,
                           COUNT(*) FROM peeks GROUP BY 1""")),

@@ -1,6 +1,6 @@
 # Survey report template (the survey report's contract)
 
-A survey report is short: it maps a whole lab and says where a deep audit would pay off. `report.md` must have these sections, in this order. Any change to this file is deliberate and needs a row in `docs/decisions.md`. Keep it in sync with `summary.json` `schema_version` (currently 2).
+A survey report is short: it maps a whole lab and says where a deep audit would pay off. `report.md` must have these sections, in this order. Any change to this file is deliberate and needs a row in `docs/decisions.md`. Keep it in sync with `summary.json` `schema_version` (currently 3).
 
 **`render.py` writes the data and the fixed sentences; you write the interpretation.**
 - Write every `{{table:NAME}}`, `{{facts:NAME}}` and `{{chart:NAME}}` line exactly as shown, alone, with blank lines around it. `render.py` replaces each with a table, with bullets built from `summary.json` (totals, coverage, method, limits, and "showing N of M" lines), or with a chart (a one-line caption in `report.md`, an interactive figure in `report.html`). Never write or edit these by hand; re-running `render.py` regenerates them.

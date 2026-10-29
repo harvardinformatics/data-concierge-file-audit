@@ -6,14 +6,17 @@
 # (limits per https://docs.rc.fas.harvard.edu/kb/running-jobs/#Slurm_Partitions):
 #   sbatch --parsable -p <partition> -t <time> -c <cpus> --mem=<mem> --array=0-<N-1>%<K> \
 #     -o audits/<run>/slurm/%x-%A_%a.out -e audits/<run>/slurm/%x-%A_%a.err \
-#     .claude/skills/lab-storage-audit/scripts/scan_array.sbatch audits/<run>
-# Keep tasks x cpus <= 16 concurrent walkers (metadata-server load).
+#     .claude/skills/lab-storage-audit/scripts/scan_array.sbatch audits/<run> [scan.py options]
+# Walkers wait on Lustre (~10-25% CPU each), so run more walkers than cores: e.g. -c 2 with
+# --workers 8 after the run dir (default: one walker per allocated CPU).
+# Keep tasks x walkers <= 16 concurrent walkers (metadata-server load).
 # Dev rule: <=3 jobs at once, array tasks included (use the %K throttle).
 #SBATCH -J lsa-scan
 #SBATCH --open-mode=append
 set -euo pipefail
 
-RUN="$(realpath "${1:?usage: scan_array.sbatch <run_dir>}")"
+RUN="$(realpath "${1:?usage: scan_array.sbatch <run_dir> [scan.py options]}")"
+shift
 SCRIPTS="${SLURM_SUBMIT_DIR:?}/.claude/skills/lab-storage-audit/scripts"
 TASK="${SLURM_ARRAY_TASK_ID:-0}"
 NTASKS="${SLURM_ARRAY_TASK_COUNT:-1}"
@@ -29,5 +32,5 @@ trap fail ERR
 echo "lsa-scan task $TASK/$NTASKS on $(hostname) at $(date -Is); run=$RUN"
 set +u; module load python; set -u
 python3 "$SCRIPTS/scan.py" --run "$RUN" --task-index "$TASK" --num-tasks "$NTASKS" \
-    --workers "${SLURM_CPUS_PER_TASK:-1}"
+    --workers "${SLURM_CPUS_PER_TASK:-1}" "$@"     # a later --workers wins
 echo "lsa-scan task $TASK done at $(date -Is)"

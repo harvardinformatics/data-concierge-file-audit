@@ -2,6 +2,7 @@
 import gzip
 import json
 import os
+import re
 
 import pytest
 
@@ -55,7 +56,7 @@ def test_peek_and_summary_on_lab(lab, tmp_path):
         assert len(p.get("lines", [])) <= 8 and all(len(x) <= 160 for x in p.get("lines", []))
 
     s = _summary(run_dir)
-    assert s["schema_version"] == 2 and s["mode"] == "deep"
+    assert s["schema_version"] == 3 and s["mode"] == "deep"
     assert s["peeks"]["n"] == len(peeks)
     d = s["duplicates"]
     assert d["reclaimable_bytes"] == 3 * 64 * KB
@@ -67,6 +68,28 @@ def test_peek_and_summary_on_lab(lab, tmp_path):
     top = {f["path"]: f for f in rows(s["folders"])}
     assert top["."]["bytes"] == s["totals"]["bytes"]
     assert top["."]["top_categories"][0] == ["raw", 6 * 64 * KB]
+
+
+def test_summary_owners(lab, tmp_path):
+    """Folders keep their top owners and own owner; users get their main folders."""
+    import sqlite3
+    run_dir = _run(lab, tmp_path, "--exclude", "excluded")
+    me = os.getuid()
+    with sqlite3.connect(os.path.join(run_dir, "audit.sqlite")) as db:   # a second member
+        db.execute("INSERT INTO users VALUES (4242, 'bob', 1)")
+        db.execute("UPDATE files SET uid = 4242 WHERE dir = 'userB/copy'")
+        db.execute("UPDATE dirs SET uid = 4242 WHERE path = 'userA'")
+    post.run_post(run_dir, stages=["summarize"])
+    s = _summary(run_dir)
+    f = {r["path"]: r for r in rows(s["folders"])}
+    root = f["."]["owners"]
+    assert len(root) == 2 and root[0][0] == f["."]["top_owner"] and root[0][1] >= root[1][1]
+    assert "bob" in dict(root) and f["."]["other_owners_bytes"] == 0
+    assert dict(f["userB"]["owners"])["bob"] > 0                # userB/copy is bob's
+    assert f["userC"]["owners"] == []                           # one owner: no list
+    assert f["userA"]["dir_owner"] == "bob" and f["userA"]["top_owner"] != "bob"
+    u = {r["uid"]: r for r in rows(s["users"]["table"])}
+    assert u[4242]["top_folders"][0][0] == "userB" and u[me]["top_folders"]
 
 
 def test_pipeline_work_is_not_a_duplicate(tmp_path):
@@ -93,6 +116,16 @@ def test_pipeline_work_is_not_a_duplicate(tmp_path):
     assert folders["run/work"] == 1 and folders["run/data_raw"] == 0
     assert all("work" not in r["path"] for r in rows(s["raw_locations"]["top"]))
     assert all("work" not in o["dir_a"] + o["dir_b"] for o in rows(d["dir_overlap"]))
+
+
+def test_summary_with_failed_peek(lab, tmp_path):
+    """A peek that couldn't read its file has no format; summarize must still write."""
+    import sqlite3
+    run_dir = _run(lab, tmp_path, "--exclude", "excluded")
+    with sqlite3.connect(os.path.join(run_dir, "audit.sqlite")) as db:
+        db.execute("UPDATE peeks SET format = NULL WHERE id = (SELECT MIN(id) FROM peeks)")
+    post.run_post(run_dir, stages=["summarize"])
+    assert _summary(run_dir)["peeks"]["by_format"]["unreadable"] == 1
 
 
 def test_peek_cap(lab, tmp_path):
@@ -147,7 +180,7 @@ Intro with **bold**, *italic*, data_raw_dir_name and <script>alert(1)</script>.
 > note
 """
     out = render.render(md)
-    assert "<script>" not in out and "&lt;script&gt;" in out
+    assert "<script>alert" not in out and "&lt;script&gt;alert" in out
     assert "<title>Audit of lab</title>" in out
     assert "data_raw_dir_name" in out and "<em>italic</em>" in out
     assert "<code>a/&lt;b&gt;</code>" in out and "<td>c|d</td>" in out
@@ -249,7 +282,8 @@ def test_render_facts_duplicates_and_lint():
     assert any("don't write 'showing N'" in w for w in warns)
     assert any("words of prose" in w for w in render.lint(
         "## Users\n\n- **Patterns:** " + "word " * 61 + "\n", "survey"))
-    assert render.lint(md, "deep") == []
+    assert any("showing N" in w for w in render.lint(md, "deep"))     # deep is linted too
+    assert render.lint(md, "other") == []
 
 
 def test_render_sunburst_chart():
@@ -265,7 +299,7 @@ def test_render_sunburst_chart():
              ["a/<b>", 2, "ok", 400, 2, 1, None, None, 0, 0, [], "uid:9"],
              ["c", 1, "unreadable", 300, 1, 1, None, None, 1, 0, [], "uid:9"]]}}
     out, used = render.expand("# T\n\n{{chart:sunburst}}\n", s)
-    assert used == ["chart:sunburst"] and render.CHART_NOTES["sunburst"] in out
+    assert used == ["chart:sunburst"] and render.CHART_MD["sunburst"](s)[0] in out
     page = render.render(out, s)
     svg = page.split("<svg")[1].split("</svg>")[0]
     assert svg.count("<path") == 5                  # a, c, a/<b>, and the rest of . and of a
@@ -275,6 +309,63 @@ def test_render_sunburst_chart():
     assert '<li data-o="bob" tabindex="0">' in page and "<!--" not in page
     assert "<svg" not in render.render(out)         # no summary: the caption is kept instead
     assert "Not available" in render.expand("{{chart:sunburst}}\n", {"totals": {"bytes": 1}})[0]
+
+
+def test_render_ownership():
+    cols = ["path", "level", "status", "bytes", "files", "dirs", "newest", "last_activity",
+            "problem_dirs_below", "pipeline_work", "top_categories", "top_owner", "owners",
+            "other_owners_bytes", "dir_owner"]
+    s = {"generated": "2026-10-28T00:00:00", "run": {"target": "/n/lab"},
+         "totals": {"bytes": 1000, "files": 10, "dirs": 5},
+         "users": {"n": 2, "table": {"cols": ["user", "uid", "in_group", "files", "bytes", "newest",
+                                              "top_folders"],
+                                     "rows": [["ann", 1, True, 6, 600, "2026-01-01", [["a", 500]]],
+                                              ["bob", 2, False, 4, 400, "2020-01-01", [["a", 300]]]]}},
+         "folders": {"cols": cols, "rows": [
+             [".", 0, "ok", 1000, 10, 5, None, None, 0, 0, [], "ann", [["ann", 600], ["bob", 400]], 0, "ann"],
+             ["a", 1, "ok", 800, 8, 3, None, None, 0, 0, [], "ann", [["ann", 500], ["bob", 300]], 0, "ann"],
+             ["a/x", 2, "ok", 500, 5, 1, None, None, 0, 0, [], "ann", [["ann", 300], ["bob", 200]], 0, "bob"],
+             ["a/y", 2, "ok", 300, 3, 1, None, None, 0, 0, [], "ann", [], 0, "ann"],
+             ["c", 1, "ok", 200, 2, 1, None, None, 0, 0, [], "bob", [], 0, "ann"]]},
+         "duplicates": {"reclaimable_bytes": 100},
+         "by_category": {"cols": ["category", "files", "bytes"], "rows": [["raw", 2, 250]]},
+         "raw_locations": {"dirs": 3},
+         "age_by_year": {"cols": ["year", "files", "bytes"], "rows": [["2020", 4, 400], ["2026", 6, 600]]}}
+    mixed = [r["path"] for r in render._mixed_rows(s)]
+    assert mixed == ["a/x", "c"]          # '.' and 'a' have a flagged subfolder; c: folder owner differs
+    out, used = render.expand("{{table:owners}}\n{{table:mixed_folders}}\n{{chart:glance}}\n", s)
+    assert "| ann | 600 B | 60.0% | 6 | `a` 83.3% | 2026-01-01 |  |" in out
+    assert "not in group; no new files in 2+ years" in out
+    assert "| `a/x` | 500 B | ann 60%, bob 40% | bob (differs) |" in out
+    assert "- **100 B** likely duplicate copies (10.0% of the total)" in out
+    assert "- **2** owners (2 folders with mixed ownership)" in out
+    assert "- **40.0%** unchanged 2+ years (400 B)" in out
+    page = render.render(render.expand(out + "{{chart:sunburst}}\n{{chart:owners}}\n", s)[0], s)
+    assert page.count('class="gl"') == 1 and "likely duplicate copies" in page
+    svg = page.split("<svg")[1].split("</svg>")[0]
+    assert 'id="sbh-k0"' in svg and 'style="fill:url(#sbh-k0)"' in svg     # mixed: hatched
+    assert 'data-os="ann 60%, bob 40%"' in svg and 'data-dw="bob"' in svg
+    bars = page.split('<figure class="ob">')[1].split("</figure>")[0]
+    assert bars.count('class="r"') == 3 and 'title="bob: 300 B (37.5%)"' in bars
+    assert '<path class="k1"' in svg and '<s class="k1"' in bars        # bob: one colour everywhere
+    assert '<i class="k1"></i>bob' in bars
+
+
+def test_render_collapsed_sections():
+    md = ("# T\n\nIntro.\n\n## Key findings\n\n- a\n\n## Scope and method\n\n- b\n\n"
+          "## Flagged content\n\nNone found.\n\n## Questions for the PI\n\n1. q\n")
+    deep = render.render(md, {"mode": "deep"})
+    n_open = lambda p: len(re.findall(r"<details[^>]* open>", p))  # noqa: E731
+    assert n_open(deep) == 2 and deep.count("<details") == 4
+    assert '<details class="hl" open><summary><h2 id="key-findings">' in deep
+    assert '<details><summary><h2 id="scope-and-method">' in deep
+    assert '<details><summary><h2 id="flagged-content">' in deep        # "None…" only
+    assert deep.index("<p>Intro.</p>") < deep.index("<details")          # preamble stays out
+    assert 'id="xall">Expand all</a>' in deep and "beforeprint" in deep
+    survey = render.render(md, {"mode": "survey"})                       # no title list yet
+    assert n_open(survey) == 3 and survey.count("<details") == 4
+    assert render.render(md) == survey                                   # no summary: as survey
+    assert 'id="xall"' not in render.render(md.replace("None found.", "One file."))
 
 
 def test_short_paths():
