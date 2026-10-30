@@ -20,6 +20,7 @@ separately in `pipeline_workdirs`.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -27,11 +28,14 @@ from collections import Counter, defaultdict
 
 import common as C
 
-SUMMARY_VERSION = 2
+SUMMARY_VERSION = 4
 WARN_BYTES = 50_000
 FOLDER_DEPTH = {"deep": 2, "survey": 3}      # folder rows go this many levels below each root
 MAX_LEVEL1 = 60                              # level-1 folders always listed (the rest summed)
 DETAIL_ROWS = 15                             # largest level-2 folders always listed
+OLD_YEARS = {"deep": 2, "survey": 3}         # "old" = not modified in this many years
+SPLIT_AREA = 0.5                             # an area holding more than this share splits
+SYSTEM_UID = 1000                            # below: system accounts (root), not members
 _WORK = re.compile(r"(^|/)(work/[0-9a-f]{2}/[0-9a-f]{30}|\.snakemake)(/|$)")
 # Sensitive-name matches here are almost always package files (certifi's *.pem,
 # a library's secret*.py), not a lab's credentials.
@@ -68,6 +72,10 @@ def dumps(obj, ind: str = "") -> str:
         return "{\n" + ",\n".join(f"{inner}{json.dumps(k)}:{dumps(v, inner)}"
                                    for k, v in sorted(obj.items())) + "\n" + ind + "}"
     return _compact(obj)
+
+
+def _parent(path: str) -> str:
+    return path.rsplit("/", 1)[0] if "/" in path else "."
 
 
 def _ancestors(path: str):
@@ -111,6 +119,10 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
     def in_group(uid) -> bool:
         return bool(uname.get(uid, (None, 0))[1])
 
+    def former(uid) -> bool:
+        """A past member: an account not in the lab's group (or deleted), not a system one."""
+        return uid is not None and uid >= SYSTEM_UID and not in_group(uid)
+
     r = cur.execute("""SELECT SUM(kind='f'), SUM(kind='l'), SUM(kind NOT IN ('f','l')),
         COALESCE(SUM(CASE WHEN kind='f' THEN size END),0), COALESCE(SUM(blocks),0) * 512,
         MIN(CASE WHEN kind='f' THEN mtime END), MAX(CASE WHEN kind='f' THEN mtime END)
@@ -144,7 +156,11 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
 
     user_rows = cur.execute("""SELECT uid, COUNT(*), SUM(size), MAX(mtime) FROM files
         WHERE kind='f' GROUP BY uid ORDER BY SUM(size) DESC""").fetchall()
-    users = {"n": len(user_rows), "table": _table(
+    users = {"n": len(user_rows),
+             "active": sum(1 for u, *_ in user_rows if in_group(u)),
+             "former": sum(1 for u, *_ in user_rows if former(u)),
+             "former_bytes": sum(nb or 0 for u, _, nb, _ in user_rows if former(u)),
+             "table": _table(
         ["user", "uid", "in_group", "files", "bytes", "newest"],
         ([None if who(u).startswith("uid:") else who(u), u, in_group(u), nf, nb, _date(nw)]
          for u, nf, nb, nw in user_rows[:50]))}
@@ -182,9 +198,9 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
         return None
 
     cand = []
-    for path, depth, status, nf, nb, nd, newest, active, probs in cur.execute(
+    for path, depth, status, nf, nb, nd, newest, active, probs, duid in cur.execute(
             """SELECT path, depth, status, files_total, bytes_total, dirs_total, newest_mtime,
-                      activity_mtime, problem_dirs_below FROM dirs WHERE depth <= ?""",
+                      activity_mtime, problem_dirs_below, uid FROM dirs WHERE depth <= ?""",
             (max(root_depth.values()) + folder_depth,)):
         lv = level(path, depth)
         if lv is None or lv > folder_depth:
@@ -192,7 +208,7 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
         nb, nf = nb or 0, nf or 0
         if lv <= 2 or nb >= tb // 1000 or nf >= tf // 1000:
             cand.append((max(nb / tb, nf / tf), path, lv, status, nb, nf, nd, newest, active,
-                         probs))
+                         probs, duid))
     by_bytes = sorted(cand, key=lambda c: (-c[4], c[1]))
     level1 = [c for c in by_bytes if c[2] == 1]
     forced = level1[:MAX_LEVEL1] + [c for c in by_bytes if c[2] == 2][:DETAIL_ROWS]
@@ -207,22 +223,62 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
     n_folders = len(forced) + len(shared)
     folders = {c[1]: {"row": c[2:], "cat": defaultdict(int), "own": defaultdict(int)}
                for c in chosen}
+    # areas, for the life-cycle view (content mix, old, former members): the level-1 folders,
+    # except that one holding more than SPLIT_AREA of the bytes is replaced by its listed
+    # subfolders (to folder_depth), so a lab root's `Lab/` becomes its member and project dirs
+    kids: dict = defaultdict(list)
+    for c in cand:
+        kids[_parent(c[1])].append(c)
+    area_rows, todo = [], list(level1)
+    while todo:
+        c = todo.pop()
+        if c[4] > SPLIT_AREA * tb and c[2] < folder_depth and kids.get(c[1]):
+            todo += kids[c[1]]
+        else:
+            area_rows.append(c)
+    area_rows.sort(key=lambda c: (-c[4], c[1]))
+    areas = {c[1]: {"cat": defaultdict(int), "old": 0, "former": 0, "envs": 0, "env_bytes": 0,
+                    "raw": 0, "row": c} for c in area_rows[:MAX_LEVEL1]}
+    # "old": last changed in (this year - OLD_YEARS) or earlier, as in the report's age facts
+    old_cut = time.mktime((time.localtime().tm_year - OLD_YEARS.get(mode, 2) + 1,
+                           1, 1, 0, 0, 0, 0, 0, -1))
     if "file_class" in tables and folders:
-        for d, cat, uid, b in cur.execute("""SELECT f.dir, c.category, f.uid, SUM(f.size)
-                FROM files f JOIN file_class c ON c.id = f.id GROUP BY f.dir, c.category, f.uid"""):
+        for d, cat, uid, old, b in cur.execute("""SELECT f.dir,
+                    CASE WHEN c.ftype = 'Container images' THEN 'container' ELSE c.category END,
+                    f.uid, f.mtime < ?, SUM(f.size)
+                FROM files f JOIN file_class c ON c.id = f.id GROUP BY 1, 2, 3, 4""", (old_cut,)):
             for a in _ancestors(d):
                 if a in folders:
-                    folders[a]["cat"][cat] += b
+                    folders[a]["cat"]["code-env" if cat == "container" else cat] += b
                     folders[a]["own"][uid] += b
+                if a in areas:
+                    ar = areas[a]
+                    ar["cat"][cat] += b
+                    ar["old"] += b if old else 0
+                    ar["former"] += b if former(uid) else 0
+    # owners: who holds the bytes (only a file's owner can move or change it). The top 3
+    # file owners with their bytes when there is more than one, plus the rest summed; and
+    # dir_owner, the folder's own owner (renaming or moving needs write access to it).
     frows = []
+    user_folders: dict = defaultdict(list)          # uid -> [(bytes, path)] at level 1
     for path, f in folders.items():
-        lv, status, nb, nf, nd, newest, active, probs = f["row"]
+        lv, status, nb, nf, nd, newest, active, probs, duid = f["row"]
         cats = sorted(f["cat"].items(), key=lambda x: -x[1])[:3]
-        top = max(f["own"].items(), key=lambda x: x[1], default=(None, 0))[0]
+        own = sorted(f["own"].items(), key=lambda x: (-x[1], x[0]))
+        top = own[0][0] if own else None
+        if lv == 1:
+            for u, b in own:
+                user_folders[u].append((b, path))
         frows.append([path, lv, status, nb, nf, nd, _date(newest), _date(active), probs,
                       int(in_work(path)), [[c, b] for c, b in cats],
-                      None if top is None else who(top)])
+                      None if top is None else who(top),
+                      [[who(u), b] for u, b in own[:3]] if len(own) > 1 else [],
+                      sum(b for _, b in own[3:]), None if duid is None else who(duid)])
     frows.sort(key=lambda r: r[0])
+    for r in users["table"]["rows"]:                # each user's 3 biggest top-level folders
+        r.append([[p, b] for b, p in sorted(user_folders.get(r[1], []),
+                                            key=lambda x: (-x[0], x[1]))[:3]])
+    users["table"]["cols"].append("top_folders")
 
     out = {
         "schema_version": SUMMARY_VERSION,
@@ -238,7 +294,8 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
         "users": users,
         "folders": _table(["path", "level", "status", "bytes", "files", "dirs", "newest",
                            "last_activity", "problem_dirs_below", "pipeline_work",
-                           "top_categories", "top_owner"], frows),
+                           "top_categories", "top_owner", "owners", "other_owners_bytes",
+                           "dir_owner"], frows),
         "pipeline_workdirs": workdirs,
         "age_by_year": _table(["year", "files", "bytes"], cur.execute(
             """SELECT strftime('%Y', mtime, 'unixepoch') AS year, COUNT(*), SUM(size)
@@ -301,13 +358,17 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
         trees.sort(key=lambda t: -t[3])
         out.setdefault("duplicates", {})["dir_trees"] = {"n": len(trees), "top": _table(
             ["copies", "bytes_each", "files_each", "reclaimable", "paths"], trees[:10])}
+    if areas:
+        out["areas"] = _areas(cur, tables, areas, run, raw if "type_stats" in tables else [])
+        out["life_cycle"] = _life_cycle(cur, tables, areas, run, tot)
     out["capped"] = _capped(out, n_folders, n_raw_rows)
     if "peeks" in tables:
         out["peeks"] = {
             "file": "peeks.jsonl",
             "n": cur.execute("SELECT COUNT(*) FROM peeks").fetchone()[0],
-            "by_format": dict(cur.execute(
-                "SELECT format, COUNT(*) FROM peeks GROUP BY format ORDER BY 2 DESC")),
+            "by_format": dict(cur.execute(              # a peek that failed has no format
+                """SELECT COALESCE(format, 'unreadable'), COUNT(*) FROM peeks GROUP BY 1
+                   ORDER BY 2 DESC""")),
             "by_category": dict(cur.execute(
                 """SELECT CASE WHEN type_key LIKE 'unknown:%' THEN 'unknown' ELSE 'known' END,
                           COUNT(*) FROM peeks GROUP BY 1""")),
@@ -315,6 +376,87 @@ def build(db: sqlite3.Connection, run: dict, max_folders: int = 120) -> dict:
                 "SELECT path FROM peeks WHERE injection_suspect ORDER BY path")],
         }
     return out
+
+
+def _area_of(path: str, areas: dict) -> str | None:
+    for a in _ancestors(path):
+        if a in areas:
+            return a
+    return None
+
+
+def _areas(cur, tables, areas: dict, run: dict, raw: list) -> dict:
+    """One row per level-1 folder: content by category (containers apart from other
+    software), bytes not modified in OLD_YEARS, bytes owned by former members, software
+    environments, and raw bytes."""
+    if "dir_markers" in tables:
+        for path, nb in cur.execute("""SELECT m.path, d.bytes_total FROM dir_markers m
+                LEFT JOIN dirs d ON d.path = m.path WHERE m.marker IN (?, ?)""", _ENV_MARKERS):
+            if (a := _area_of(path, areas)):
+                areas[a]["envs"] += 1
+                areas[a]["env_bytes"] += nb or 0
+    for d, _ft, _nf, nb, _o, _n in raw:
+        if (a := _area_of(d, areas)):
+            areas[a]["raw"] += nb or 0
+    rows = []
+    for path, ar in sorted(areas.items(), key=lambda kv: (-kv[1]["row"][4], kv[0])):
+        c = ar["row"]
+        cats = sorted(((k, b) for k, b in ar["cat"].items() if b), key=lambda x: (-x[1], x[0]))
+        rows.append([path, c[4], c[5], [[k, b] for k, b in cats], ar["old"], ar["former"],
+                     ar["envs"], ar["env_bytes"], ar["raw"]])
+    return {"old_years": OLD_YEARS.get(run.get("mode", "deep"), 2), "table": _table(
+        ["path", "bytes", "files", "by_category", "old_bytes", "former_bytes", "envs",
+         "env_bytes", "raw_bytes"], rows)}
+
+
+def _life_cycle(cur, tables, areas: dict, run: dict, tot: dict) -> dict:
+    """How data moves between areas: duplicate groups whose copies span two or more areas
+    (raw data, references, containers), and symlinks from one area into another or out of
+    the target. Duplicates are only as complete as the dupes stage's min size."""
+    shared: dict = {}
+    if "dup_members" in tables and "file_class" in tables:
+        groups: dict = {}
+        for gid, size, n_phys, d, cat, ftype in cur.execute("""
+                SELECT m.gid, g.size, g.n_phys, f.dir, c.category, c.ftype
+                FROM dup_members m JOIN dup_groups g USING (gid)
+                JOIN files f ON f.dev = m.dev AND f.ino = m.ino AND f.kind = 'f'
+                JOIN file_class c ON c.id = f.id"""):
+            g = groups.setdefault(gid, {"size": size, "n": n_phys, "areas": set(),
+                                        "kind": "container" if ftype == "Container images"
+                                        else cat})
+            g["areas"].add(_area_of(d, areas) or ".")
+        for g in groups.values():
+            if len(g["areas"]) >= 2:
+                k = shared.setdefault(g["kind"], {"groups": 0, "bytes": 0, "areas": set()})
+                k["groups"] += 1
+                k["bytes"] += g["size"] * (g["n"] - 1)
+                k["areas"] |= g["areas"]
+    across = _table(["kind", "groups", "reclaimable", "areas"], sorted(
+        ([k, v["groups"], v["bytes"], len(v["areas"])] for k, v in shared.items()),
+        key=lambda r: -r[2]))
+
+    target = run.get("target") or ""
+    pairs: Counter = Counter()
+    n_links = 0
+    for d, link in cur.execute("SELECT dir, link FROM files WHERE kind = 'l'"):
+        n_links += 1
+        if not link:
+            continue
+        if link.startswith("/"):
+            dst = link[len(target) + 1:] if link.startswith(target + "/") else None
+        else:
+            dst = os.path.normpath(os.path.join("" if d == "." else d, link))
+            dst = None if dst == ".." or dst.startswith("../") else dst
+        src_a = _area_of(d, areas) or "."
+        dst_a = "(outside)" if dst is None else (_area_of(dst, areas) or ".")
+        if dst_a != src_a:
+            pairs[(src_a, dst_a)] += 1
+    links = {"n": n_links, "cross_area": sum(n for (_, b), n in pairs.items() if b != "(outside)"),
+             "outside": sum(n for (_, b), n in pairs.items() if b == "(outside)"),
+             "top": _table(["from", "to", "links"], (
+                 [a, b, n] for (a, b), n in sorted(pairs.items(),
+                                                   key=lambda kv: (-kv[1], kv[0]))[:15]))}
+    return {"copied_across_areas": across, "links": links}
 
 
 def _capped(out: dict, n_folders: int, n_raw_rows: int) -> dict:
