@@ -46,9 +46,7 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common as C  # noqa: E402
-
-SCRIPTS = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.realpath(os.path.join(SCRIPTS, *[os.pardir] * 4))   # excluded when inside a target
+import summary as S  # noqa: E402
 
 CSS = """
 :root{--bg:#fff;--fg:#1d2025;--muted:#5d6470;--line:#d9dde3;--soft:#f3f5f8;--accent:#a51c30;
@@ -212,8 +210,7 @@ def _list(lines: list[str]) -> str:
 TABLE_TITLES = {
     "areas_top": "Top-level folders", "areas_detail": "Largest folders", "users": "Users",
     "owners": "Owners", "mixed_folders": "Folders with mixed ownership",
-    "duplicates": "Likely duplicates", "big_duplicates": "Big duplicates",
-    "dir_overlap": "Folders sharing files", "dir_trees": "Identical folder trees",
+    "duplicates": "Likely duplicates", "dir_trees": "Identical folder trees",
     "unreadable": "Unreadable directories", "raw_data": "Raw data locations",
     "unknown_types": "Unknown file types", "pipeline_workdirs": "Pipeline work folders",
     "age": "Files by year of last change", "size_histogram": "Files by size",
@@ -543,17 +540,19 @@ def t_areas_detail(s, limit=15):
         min(limit, len(rows)), total, "folders at this level")
 
 
+def _user_note(r: dict, cut: str) -> str:
+    """Note for a users row: not in the group or deleted, and no new files since `cut`."""
+    out = [] if r["in_group"] else ["not in group" if r["user"] else "deleted account"]
+    if cut and r["newest"] and r["newest"] < cut:
+        out.append("no new files in 2+ years")
+    return "; ".join(out)
+
+
 def t_users(s, limit=15):
     u = s["users"]
     cut = _cutoff(s, 2)
-
-    def note(r):
-        out = [] if r["in_group"] else ["not in group" if r["user"] else "deleted account"]
-        if cut and r["newest"] and r["newest"] < cut:
-            out.append("no new files in 2+ years")
-        return "; ".join(out)
     body = [[r["user"] or f"(deleted, uid {r['uid']})", "yes" if r["in_group"] else "no",
-             C.human_bytes(r["bytes"]), _n(r["files"]), r["newest"] or "", note(r)]
+             C.human_bytes(r["bytes"]), _n(r["files"]), r["newest"] or "", _user_note(r, cut)]
             for r in _rows(u["table"])[:limit]]
     return _md(["User", "In group", "Size", "Files", "Newest file", "Note"], body) + _showing(
         len(body), u["n"], "users")
@@ -606,16 +605,10 @@ def t_owners(s, limit=15):
     u, tb = s["users"], s["totals"]["bytes"]
     cut = _cutoff(s, 2)
 
-    def note(r):
-        out = [] if r["in_group"] else ["not in group" if r["user"] else "deleted account"]
-        if cut and r["newest"] and r["newest"] < cut:
-            out.append("no new files in 2+ years")
-        return "; ".join(out)
-
     def where(r):
         return ", ".join(f"{_code(p)} {_pct(b, r['bytes'])}" for p, b in r.get("top_folders") or [])
     body = [[r["user"] or f"(deleted, uid {r['uid']})", C.human_bytes(r["bytes"]),
-             _pct(r["bytes"], tb), _n(r["files"]), where(r), r["newest"] or "", note(r)]
+             _pct(r["bytes"], tb), _n(r["files"]), where(r), r["newest"] or "", _user_note(r, cut)]
             for r in _rows(u["table"])[:limit]]
     return _md(["Owner", "Size", "Share", "Files", "Main folders (share of theirs)",
                 "Newest file", "Note"], body) + _showing(len(body), u["n"], "owners")
@@ -681,23 +674,6 @@ def t_duplicates(s, limit=12):
          "folder pairs outside pipeline work."] if body else [])
 
 
-def t_big_duplicates(s, limit=10):
-    t = s["duplicates"]["top_groups"]
-    body = [[C.human_bytes(r["size"]), _n(r["copies_outside_pipeline_work"]),
-             C.human_bytes(r["reclaimable_outside_pipeline_work"]),
-             _path(r["paths"][0]) if r["paths"] else ""] for r in _rows(t)[:limit]]
-    return _md(["Size each", "Copies", "Reclaimable", "Example path"], body) + _showing(
-        len(body), _total(s, "duplicates.top_groups", t), "duplicate groups")
-
-
-def t_dir_overlap(s, limit=10):
-    t = s["duplicates"]["dir_overlap"]
-    body = [[*_pair(r["dir_a"], r["dir_b"]), C.human_bytes(r["shared_bytes"]),
-             _n(r["shared_files"])] for r in _rows(t)[:limit]]
-    return _md(["Folder A", "Folder B", "Shared", "Files"], body) + _showing(
-        len(body), _total(s, "duplicates.dir_overlap", t), "folder pairs")
-
-
 def t_dir_trees(s, limit=10):
     t = s["duplicates"]["dir_trees"]
     body = [[_n(r["copies"]), C.human_bytes(r["bytes_each"]), _n(r["files_each"]),
@@ -729,7 +705,7 @@ def t_raw_data(s, limit=10):
 
 def _hints() -> dict[str, str]:
     """rules.toml [[hint]] entries: extensions we can only guess at (not classified)."""
-    with open(os.path.join(SCRIPTS, "rules.toml"), "rb") as fh:
+    with open(C.SCRIPTS_DIR / "rules.toml", "rb") as fh:
         rules = tomllib.load(fh)
     return {e.lower(): h["likely"] for h in rules.get("hint", []) for e in h.get("ext", [])}
 
@@ -828,7 +804,7 @@ def t_touched_old(s, limit=8):
 
 
 def _old_years(s) -> int:
-    return s.get("areas", {}).get("old_years") or (3 if s.get("mode") == "survey" else 2)
+    return S.OLD_YEARS.get(s.get("mode"), 2)
 
 
 def _old_bytes(s, years: int) -> int:
@@ -921,7 +897,7 @@ def f_scope(s):
     def rel(p):
         q = os.path.relpath(p, tgt) if p.startswith(tgt + "/") else p
         return _code(q) + (" (this tool's repo, always excluded)"
-                           if os.path.realpath(p) == REPO else "")
+                           if os.path.realpath(p) == str(C.REPO_ROOT) else "")
     roots = [x for x in r.get("roots", ["."]) if x != "."]
     read = (f"- **Read:** metadata for {_n(t['files'])} files, {_n(t.get('symlinks', 0))} "
             f"symlinks and {_n(t['dirs'])} directories")
@@ -1400,24 +1376,20 @@ def c_sunburst(s, size: int = 600, min_angle: float = 0.002) -> str:
 
 CHARTS = {name[2:]: fn for name, fn in globals().items() if name.startswith("c_")}
 
-# the blocks each template asks for; a report missing one gets a warning
-REQUIRED = {
-    "survey": ("chart:glance", "chart:sunburst", "facts:raw_access", "raw_access", "links",
-               "facts:shared", "shared", "facts:old", "old_areas", "age", "facts:types",
-               "types", "raw_data", "unknown_types", "sensitive", "chart:areas", "facts:areas",
-               "areas_top", "areas_detail", "small_files", "facts:pipeline",
-               "pipeline_workdirs", "touched_old", "users", "facts:duplicates", "duplicates",
-               "facts:scope", "facts:storage", "facts:unreadable", "unreadable",
-               "size_histogram", "by_category"),
-    "deep": ("chart:glance", "chart:sunburst", "chart:owners", "owners", "mixed_folders",
-             "areas_top", "areas_detail", "small_files", "touched_old", "raw_data",
-             "facts:duplicates", "duplicates", "dir_trees", "facts:scope", "facts:storage",
-             "facts:unreadable", "unreadable", "facts:age", "age", "facts:pipeline",
-             "pipeline_workdirs", "by_category", "unknown_types"),
-}
 _MARK = re.compile(r"^\{\{(table|facts|chart):([a-z_]+)\}\}\s*$")
 _REGION = re.compile(r"^<!-- (table|facts|chart):([a-z_]+) -->$")
 _KINDS = {"table": TABLES, "facts": FACTS, "chart": CHARTS}
+TEMPLATES = {"survey": "survey-template.md", "deep": "report-template.md"}
+
+
+def required(mode: str) -> list[str]:
+    """The blocks the mode's template asks for, named as expand() reports them; a report
+    missing one gets a warning."""
+    if mode not in TEMPLATES:
+        return []
+    with open(C.SCRIPTS_DIR.parent / "references" / TEMPLATES[mode], encoding="utf-8") as fh:
+        marks = re.findall(_MARK.pattern, fh.read(), re.M)
+    return [n if k == "table" else f"{k}:{n}" for k, n in marks]
 
 
 def expand(md: str, summary: dict) -> tuple[str, list[str]]:
@@ -1462,8 +1434,7 @@ BUDGETS = {"survey": {"Key findings": 160, "Data life cycle": 270, "Data types":
                     "Per-folder overview": 90, "Raw data": 90, "Duplicates": 90,
                     "Flagged content": 40, "Scope and method": 20, "Storage usage": 60,
                     "Unreadable and stale": 60, "Pipeline intermediates": 40, "Appendix": 120}}
-_FREE = ("Key findings", "Recommended deep audits", "Questions for the PI",   # may repeat numbers
-         "Organization observations")
+_FREE = ("Key findings", "Recommended deep audits", "Organization observations")  # may repeat numbers
 _NUMS = re.compile(r"\d[\d,]*(?:\.\d+)?\s?(?:[KMGTP]iB|%)|\d{1,3}(?:,\d{3})+")
 
 
@@ -1518,7 +1489,7 @@ def main(argv=None) -> int:
         md, used = expand(md, summary)
         C.log(f"filled: {', '.join(used) or 'none'}")
         mode = summary.get("mode", "deep")
-        missing = [n for n in REQUIRED.get(mode, ()) if n not in used]
+        missing = [n for n in required(mode) if n not in used]
         if missing:
             C.log(f"WARNING: report.md has no {{{{table|facts|chart:...}}}} line for: "
                   f"{', '.join(missing)}")
