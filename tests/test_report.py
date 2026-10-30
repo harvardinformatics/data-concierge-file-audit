@@ -56,7 +56,7 @@ def test_peek_and_summary_on_lab(lab, tmp_path):
         assert len(p.get("lines", [])) <= 8 and all(len(x) <= 160 for x in p.get("lines", []))
 
     s = _summary(run_dir)
-    assert s["schema_version"] == 3 and s["mode"] == "deep"
+    assert s["schema_version"] == 4 and s["mode"] == "deep"
     assert s["peeks"]["n"] == len(peeks)
     d = s["duplicates"]
     assert d["reclaimable_bytes"] == 3 * 64 * KB
@@ -116,6 +116,80 @@ def test_pipeline_work_is_not_a_duplicate(tmp_path):
     assert folders["run/work"] == 1 and folders["run/data_raw"] == 0
     assert all("work" not in r["path"] for r in rows(s["raw_locations"]["top"]))
     assert all("work" not in o["dir_a"] + o["dir_b"] for o in rows(d["dir_overlap"]))
+
+
+def test_summary_life_cycle(lab, tmp_path):
+    """Areas (content, old, former members), raw copied across areas, links between areas."""
+    import sqlite3
+    run_dir = _run(lab, tmp_path, "--exclude", "excluded")
+    with sqlite3.connect(os.path.join(run_dir, "audit.sqlite")) as db:
+        db.execute("INSERT INTO users VALUES (4242, 'bob', 0)")          # left the group
+        db.execute("UPDATE files SET uid = 4242 WHERE dir LIKE 'userB/%'")
+        db.execute("UPDATE files SET mtime = 0 WHERE dir = 'userB/copy'")
+        cols = [r[1] for r in db.execute("PRAGMA table_info(files)")]
+        for name, link in (("to_a", "../../userA/proj/data"), ("out", "/elsewhere/ref")):
+            row = dict(zip(cols, db.execute(
+                "SELECT * FROM files WHERE dir = 'userA' AND kind = 'l'").fetchone()))
+            row |= {"id": None, "dir": "userB/copy", "dir_raw": "userB/copy", "name": name,
+                    "name_raw": name, "link": link}
+            db.execute(f"INSERT INTO files ({','.join(row)}) VALUES ({','.join('?' * len(row))})",
+                       list(row.values()))
+    post.run_post(run_dir, stages=["summarize"])
+    s = _summary(run_dir)
+    assert s["users"]["former"] == 1 and s["users"]["active"] >= 1
+    assert s["users"]["former_bytes"] == sum(r["bytes"] for r in rows(s["users"]["table"])
+                                             if r["user"] == "bob")
+    a = {r["path"]: r for r in rows(s["areas"]["table"])}
+    assert s["areas"]["old_years"] == 2 and set(a) >= {"userA", "userB"}
+    assert a["userB"]["former_bytes"] == a["userB"]["bytes"] and a["userA"]["former_bytes"] == 0
+    assert a["userB"]["old_bytes"] == 2 * 64 * KB + len(b"same notes\n") and a["userA"]["old_bytes"] == 0
+    assert dict(a["userA"]["by_category"])["raw"] == 3 * 64 * KB    # hardlink counts per path
+    assert a["userA"]["raw_bytes"] > 0
+    across = {r["kind"]: r for r in rows(s["life_cycle"]["copied_across_areas"])}
+    assert across["raw"]["areas"] == 2 and across["raw"]["reclaimable"] >= 64 * KB
+    ln = s["life_cycle"]["links"]
+    assert ln["cross_area"] == 1 and ln["outside"] == 1
+    assert ["userB", "userA", 1] in ln["top"]["rows"] and ["userB", "(outside)", 1] in ln["top"]["rows"]
+
+
+def test_summary_areas_split(lab, tmp_path):
+    """An area holding more than half the bytes is replaced by its subfolders."""
+    import sqlite3
+    run_dir = _run(lab, tmp_path, "--exclude", "excluded")
+    with sqlite3.connect(os.path.join(run_dir, "audit.sqlite")) as db:
+        db.execute("UPDATE files SET size = size * 100 WHERE dir LIKE 'userA/%'")
+    post.run_post(run_dir, stages=["rollup", "summarize"])
+    paths = [r["path"] for r in rows(_summary(run_dir)["areas"]["table"])]
+    assert "userA/proj" in paths and "userA" not in paths and "userB" in paths
+
+
+def test_render_survey_life_cycle(lab, tmp_path):
+    """Survey glance tiles, content-mix bars and the life-cycle tables and facts."""
+    import sqlite3
+    run_dir = _run(lab, tmp_path, "--exclude", "excluded", "--mode", "survey")
+    with sqlite3.connect(os.path.join(run_dir, "audit.sqlite")) as db:
+        db.execute("INSERT INTO users VALUES (4242, 'bob', 0)")
+        db.execute("UPDATE files SET uid = 4242, mtime = 0 WHERE dir LIKE 'userB/%'")
+    post.run_post(run_dir, stages=["summarize"])
+    s = _summary(run_dir)
+    assert s["mode"] == "survey" and s["areas"]["old_years"] == 3
+    tiles = render._glance(s)
+    assert [t[1] for t in tiles] == ["scanned", "likely duplicate copies", "unchanged 3+ years",
+                                     "former members' data", "active / former members",
+                                     "folders not scanned"]
+    assert tiles[4][0] == "1 / 1" and tiles[5][0] == "2"          # userC/private and .ssh
+    md, used = render.expand("\n\n".join(f"{{{{{m}}}}}" for m in (
+        "chart:glance", "facts:raw_access", "table:raw_access", "table:links", "facts:shared",
+        "table:shared", "facts:old", "table:old_areas", "chart:areas", "facts:areas")) + "\n", s)
+    assert "Not available" not in md
+    assert "of raw data in 2 of" in md and "are copies of files in another area" in md
+    assert "| Reference genomes, indexes, annotation |" in md and "| Container images | 0 |" in md
+    assert "- **Former members:** 1 account not in the" in md
+    old = md.split("<!-- table:old_areas -->")[1].split("<!-- /table -->")[0]
+    assert old.split("\n")[3].startswith("| `userB` |")          # most old bytes first
+    page = render.render(md, s)
+    bars = page.split('<figure class="ob ar">')[1].split("</figure>")[0]
+    assert "<code" in bars and 'title="raw: ' in bars and ">100.0%<" in bars    # userB: all old
 
 
 def test_summary_with_failed_peek(lab, tmp_path):
@@ -362,9 +436,10 @@ def test_render_collapsed_sections():
     assert '<details><summary><h2 id="flagged-content">' in deep        # "None…" only
     assert deep.index("<p>Intro.</p>") < deep.index("<details")          # preamble stays out
     assert 'id="xall">Expand all</a>' in deep and "beforeprint" in deep
-    survey = render.render(md, {"mode": "survey"})                       # no title list yet
-    assert n_open(survey) == 3 and survey.count("<details") == 4
-    assert render.render(md) == survey                                   # no summary: as survey
+    survey = render.render(md, {"mode": "survey"})                       # scope collapses too
+    assert n_open(survey) == 2 and '<details><summary><h2 id="scope-and-method">' in survey
+    plain = render.render(md)                                            # no summary: no list
+    assert n_open(plain) == 3 and plain.count("<details") == 4
     assert 'id="xall"' not in render.render(md.replace("None found.", "One file."))
 
 
@@ -378,3 +453,22 @@ def test_short_paths():
     a, b = render._pair(long, long.replace("species-one-set/output", "species-two-set/output-v3"))
     assert a == "`Lab/projects/projC/…/species-one-set/…/autosomes`"
     assert b == "`Lab/projects/projC/…/species-two-set/…/autosomes`"
+
+
+def test_render_table_blocks():
+    md = ("# T\n\n## Areas\n\n- **Patterns:** p\n\nTop-level folders:\n\n<!-- table:areas_top -->\n"
+          "| A | B |\n|---|---|\n| x | 1 |\n<!-- /table -->\n\n<!-- table:links -->\nNone found.\n"
+          "<!-- /table -->\n\n<!-- table:unknown_types -->\n| E | N |\n|---|---|\n| .q | 2 |\n"
+          "Showing 1 of 30 unknown extensions.\n<!-- /table -->\n\n### Sub\n\n"
+          "<!-- table:age -->\n| Y | N |\n|---|---|\n| 2020 | 3 |\n<!-- /table -->\n\n"
+          "## Recommended deep audits\n\n| Scope | Size |\n|---|---|\n| `a` | 1 GiB |\n")
+    page = render.render(md, {"mode": "survey"})
+    assert page.count('<details class="tb"') == 4 and page.count('<table>') == 4
+    assert ('<details class="tb" open><summary>Top-level folders <small>1 row</small>'
+            in page and "<p>Top-level folders:</p>" not in page)        # caption labels it
+    assert '<p class="tn"><b>Links between areas:</b> None found.</p>' in page  # not counted
+    assert ('<details class="tb"><summary>Unknown file types <small>1 of 30 unknown '
+            'extensions</small>') in page                                # second: closed
+    assert '<details class="tb" open><summary>Files by year' in page     # first under ###
+    assert '<details class="tb" open><summary>Recommended deep audits' in page
+    assert page.index('<div class="pt"><ul><li><strong>Patterns:') < page.index('class="tb"')

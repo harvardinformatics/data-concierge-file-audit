@@ -50,7 +50,7 @@ If the PI doesn't name a mode, use **survey** for a lab root, or when `quota` sh
 3. **Wait** until `audits/<run>/post.DONE` or `post.FAILED` exists: a background `until [ -e …DONE ] || [ -e …FAILED ]; do sleep 60; done`.
    - On `FAILED`, read the sentinel JSON and `audits/<run>/slurm/*.err`, explain the failure, and stop.
 4. **Interpret**
-   - Read `audits/<run>/summary.json` in full with the Read tool, not with Bash or scripts. It's capped by design and has one table row per line (schema 3: tables are `{cols, rows}`, dates `YYYY-MM-DD`). If one Read is too large, read it in two parts with `offset`/`limit`. The template's "Reading `summary.json`" notes explain `capped`, dates and units.
+   - Read `audits/<run>/summary.json` in full with the Read tool, not with Bash or scripts. It's capped by design and has one table row per line (schema 4: tables are `{cols, rows}`, dates `YYYY-MM-DD`). If one Read is too large, read it in two parts with `offset`/`limit`. The template's "Reading `summary.json`" notes explain `capped`, dates and units.
    - Deep only: read `peeks.jsonl` with [references/filetypes.md](references/filetypes.md) to work out what the `unknown` types are and whether "raw" really is raw.
    - For drill-downs, query `audit.sqlite` read-only with `python3 -c "import sqlite3; …"` using `?mode=ro` URIs. Keep the output small, with `LIMIT`.
 5. **Report**

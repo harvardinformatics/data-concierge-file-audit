@@ -21,6 +21,10 @@ interpretation. Names: see FACTS.
 Charts too: `{{chart:NAME}}` becomes a one-line caption in report.md and an inline
 SVG (with a small inline script for hover) in report.html. Names: see CHARTS.
 
+In report.html each `##` section and each table is collapsible: a table is labelled by
+the caption line above it ("Top-level folders:") or TABLE_TITLES, and only the first
+table under each heading starts open. The Patterns bullet is drawn as a call-out.
+
 After filling, a survey report is linted (warnings only): prose over a section's
 word budget, numbers that repeat a table or facts block in the same section, and
 hand-written row counts ("showing N of M"; the tables print their own).
@@ -37,6 +41,7 @@ import os
 import re
 import sys
 import tomllib
+from collections import defaultdict
 from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -68,10 +73,14 @@ blockquote{margin:.8em 0;padding:.4em 1em;border-left:3px solid var(--accent);ba
 hr{border:0;border-top:1px solid var(--line);margin:2em 0}
 nav{display:flex;flex-wrap:wrap;gap:.25em .9em;font-size:.92em;color:var(--muted);margin-bottom:1.5em}nav a{white-space:nowrap}
 details>summary{display:block;cursor:pointer;list-style:none}details>summary::-webkit-details-marker{display:none}
-details>summary>h2::before{content:"";display:inline-block;width:.42em;height:.42em;margin:0 .55em .18em .1em;
- border:solid var(--muted);border-width:0 2px 2px 0;transform:rotate(-45deg);transition:transform .12s}
-details[open]>summary>h2::before{transform:rotate(45deg)}details:not([open])>summary>h2{color:var(--muted)}
-details>summary:hover>h2{color:var(--accent)}
+details>summary>h2::before,details.tb>summary::before{content:"";display:inline-block;width:.42em;height:.42em;
+ margin:0 .55em .18em .1em;border:solid var(--muted);border-width:0 2px 2px 0;transform:rotate(-45deg);transition:transform .12s}
+details[open]>summary>h2::before,details.tb[open]>summary::before{transform:rotate(45deg)}
+details:not([open])>summary>h2{color:var(--muted)}details>summary:hover>h2,details.tb>summary:hover{color:var(--accent)}
+details.tb{margin:.7em 0}details.tb>summary{font-weight:600;font-size:.95em}
+details.tb>summary small{font-weight:400;color:var(--muted);margin-left:.6em}details.tb>p{margin:.3em 0}
+p.tn{font-size:.95em;margin:.7em 0}p.tn b{font-weight:600}
+.pt{background:var(--soft);border-radius:6px;padding:.1em 1em;margin:.9em 0}
 details.hl{border-left:3px solid var(--accent);background:var(--soft);padding:0 16px 6px;
  border-radius:0 6px 6px 0;margin:1.4em 0}details.hl>summary>h2{border-bottom:0;margin-top:.6em}
 .gl{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:1em 0 1.4em}
@@ -85,6 +94,7 @@ details.hl{border-left:3px solid var(--accent);background:var(--soft);padding:0 
 .ob i{width:10px;height:10px;border-radius:50%;flex:none}.ob .bar{display:flex;height:14px;border-radius:3px;overflow:hidden;background:var(--kr)}
 .ob .bar s{display:block;height:100%;border-right:1px solid var(--bg)}.ob .bar s:hover{filter:brightness(1.15)}
 .ob .n{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.ob.ar .r{grid-template-columns:minmax(120px,24%) 1fr 72px 66px 66px}.ob .r.h{color:var(--muted);font-size:.9em}.ob .r.h span{text-align:right}
 .sb i.hx,.ob i.hx{background:repeating-linear-gradient(45deg,var(--muted) 0 2px,transparent 2px 5px)}
 .sb{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:12px 32px;margin:1em 0 1.6em}
 .sb svg{width:100%;max-width:520px;height:auto;flex:1 1 320px}
@@ -193,12 +203,47 @@ def _list(lines: list[str]) -> str:
     return "".join(parts)
 
 
-def to_html(md: str, charts: dict | None = None) -> tuple[str, str, list[tuple[str, str]]]:
+# label of a table block with no caption line ("Top-level folders:") above it in report.md
+TABLE_TITLES = {
+    "areas_top": "Top-level folders", "areas_detail": "Largest folders", "users": "Users",
+    "owners": "Owners", "mixed_folders": "Folders with mixed ownership",
+    "duplicates": "Likely duplicates", "big_duplicates": "Big duplicates",
+    "dir_overlap": "Folders sharing files", "dir_trees": "Identical folder trees",
+    "unreadable": "Unreadable directories", "raw_data": "Raw data locations",
+    "unknown_types": "Unknown file types", "pipeline_workdirs": "Pipeline work folders",
+    "age": "Files by year of last change", "size_histogram": "Files by size",
+    "by_category": "Files by category", "types": "File types",
+    "sensitive": "Credential-like names", "small_files": "Many small files",
+    "touched_old": "Old data, recently touched", "raw_access": "Raw data by area",
+    "links": "Links between areas", "shared": "Shared resources",
+    "old_areas": "Old and former members' data by area"}
+
+
+def _fold(label: str, lines: list[str], first: bool) -> tuple[str, bool]:
+    """A table block (the table and its "Showing N of M" line) as a collapsible <details>,
+    open when `first`. A block without a table ("None found.") stays one line.
+    Returns (html, whether it held a table)."""
+    rows = sum(ln.lstrip().startswith("|") for ln in lines) - 2
+    if rows < 0:
+        text = " ".join(x.strip() for x in lines if x.strip())
+        return f'<p class="tn"><b>{inline(label)}:</b> {inline(text)}</p>', False
+    m = re.search(r"\bShowing ([\d,]+ of [\d,]+ [^.]+)\.", "\n".join(lines))
+    count = m.group(1) if m else _plural(rows, "row", "rows")
+    return (f'<details class="tb"{" open" if first else ""}><summary>{inline(label)} '
+            f'<small>{html.escape(count)}</small></summary>\n'
+            f'{to_html(chr(10).join(lines), tables=False)[1]}\n</details>'), True
+
+
+def to_html(md: str, charts: dict | None = None,
+            tables: bool = True) -> tuple[str, str, list[tuple[str, str]]]:
+    """`tables`: draw each table as a collapsible block (`_fold`), only the first one
+    under each heading open, and the Patterns bullet as a call-out."""
     charts = charts or {}
     lines = md.splitlines()
     out: list[str] = []
     toc: list[tuple[str, str]] = []
     title = "Lab storage audit"
+    heading, caption, n_tables = "", None, 0     # tables seen under the current heading
     i = 0
     while i < len(lines):
         ln = lines[i]
@@ -216,15 +261,29 @@ def to_html(md: str, charts: dict | None = None) -> tuple[str, str, list[tuple[s
             if n == 2:
                 toc.append((hid, re.sub(r"[`*]", "", text)))
             out.append(f'<h{n} id="{hid}">{inline(text)}</h{n}>')
+            heading, n_tables = re.sub(r"[`*]", "", text), 0
             i += 1
         elif re.match(r"^(-{3,}|\*{3,})\s*$", ln):
             out.append("<hr>")
             i += 1
+        elif tables and (m := re.match(r"^<!-- table:([a-z_]+) -->$", ln)):
+            j = i + 1
+            while j < len(lines) and lines[j] != "<!-- /table -->":
+                j += 1
+            block, held = _fold(caption or TABLE_TITLES.get(m.group(1), heading),
+                                lines[i + 1:j], n_tables == 0)
+            out.append(block)
+            caption, n_tables = None, n_tables + held
+            i = j + 1
         elif ln.lstrip().startswith("|") and i + 1 < len(lines) and _SEP.match(lines[i + 1]):
             j = i + 2
             while j < len(lines) and lines[j].lstrip().startswith("|"):
                 j += 1
-            out.append(_table(lines[i:j]))
+            if tables:                              # a hand-written table (deep audits list)
+                out.append(_fold(caption or heading, lines[i:j], n_tables == 0)[0])
+                caption, n_tables = None, n_tables + 1
+            else:
+                out.append(_table(lines[i:j]))
             i = j
         elif ln.startswith(">"):
             j = i
@@ -238,7 +297,9 @@ def to_html(md: str, charts: dict | None = None) -> tuple[str, str, list[tuple[s
             while j < len(lines) and lines[j].strip() and (
                     _LIST.match(lines[j]) or lines[j].startswith("  ")):
                 j += 1
-            out.append(_list(lines[i:j]))
+            block = _list(lines[i:j])
+            out.append(f'<div class="pt">{block}</div>'
+                       if tables and ln.startswith("- **Patterns:**") else block)
             i = j
         elif (m := re.match(r"^<!-- chart:([a-z_]+) -->$", ln)) and m.group(1) in charts:
             out.append(charts[m.group(1)])          # the caption inside is for report.md only
@@ -252,7 +313,15 @@ def to_html(md: str, charts: dict | None = None) -> tuple[str, str, list[tuple[s
             while j < len(lines) and lines[j].strip() and not re.match(
                     r"^(#{1,6}\s|```|>|\||<!--|(-{3,}|\*{3,})\s*$)", lines[j]) and not _LIST.match(lines[j]):
                 j += 1
-            out.append("<p>" + inline(" ".join(x.strip() for x in lines[i:j])) + "</p>")
+            text = " ".join(x.strip() for x in lines[i:j])
+            k = j
+            while k < len(lines) and not lines[k].strip():
+                k += 1
+            if tables and text.endswith(":") and k < len(lines) and (
+                    lines[k].startswith("<!-- table:") or lines[k].lstrip().startswith("|")):
+                caption = text[:-1]                 # "Top-level folders:" labels the table
+            else:
+                out.append("<p>" + inline(text) + "</p>")
             i = j
     return title, "\n".join(out), toc
 
@@ -271,7 +340,8 @@ def charts_for(md: str, summary: dict | None) -> dict[str, str]:
 
 # sections that start collapsed, by title prefix; any section that is only "None…" does too
 COLLAPSED = {"deep": ("Scope and method", "Storage usage", "Pipeline intermediates",
-                      "Unreadable and stale directories", "Appendix")}
+                      "Unreadable and stale directories", "Appendix"),
+             "survey": ("Scope and method", "Storage usage", "Unreadable directories", "Appendix")}
 HIGHLIGHT = ("Key findings", "Organization observations")    # drawn as call-outs
 
 # opens a section when its nav link is followed, toggles all, and opens all before printing
@@ -281,7 +351,8 @@ d=t&&t.closest('details');if(d)d.open=true}document.addEventListener('click',fun
 var a=e.target.closest('a[href^="#"]');if(a&&a!==x)op(a.getAttribute('href'))});op(location.hash);
 if(x)x.addEventListener('click',function(e){e.preventDefault();var o=ds.some(function(d){return !d.open});
 ds.forEach(function(d){d.open=o});x.textContent=o?'Collapse all':'Expand all'});
-window.addEventListener('beforeprint',function(){ds.forEach(function(d){d.open=true})})})();"""
+window.addEventListener('beforeprint',function(){[].forEach.call(document.querySelectorAll('details'),
+function(d){d.open=true})})})();"""
 
 
 def _sections(body: str, collapse: tuple) -> tuple[str, int]:
@@ -751,6 +822,84 @@ def t_touched_old(s, limit=8):
         len(body), len(rows), "folders")
 
 
+def _old_years(s) -> int:
+    return s.get("areas", {}).get("old_years") or (3 if s.get("mode") == "survey" else 2)
+
+
+def _old_bytes(s, years: int) -> int:
+    """Bytes last changed in (summary year - years) or earlier."""
+    year = int(s["generated"][:4])
+    return sum(r["bytes"] for r in _rows(s["age_by_year"])
+               if r["year"] and int(r["year"]) <= year - years)
+
+
+def _cat(a: dict, *names) -> int:
+    return sum(b for c, b in a.get("by_category") or [] if c in names)
+
+
+def t_raw_access(s, limit=12):
+    """Where raw data sits, by area."""
+    areas = [a for a in _rows(s["areas"]["table"]) if a["raw_bytes"]]
+    total = sum(a["raw_bytes"] for a in areas)
+    areas.sort(key=lambda a: (-a["raw_bytes"], a["path"]))
+    body = [[_code(a["path"]), C.human_bytes(a["raw_bytes"]), _pct(a["raw_bytes"], total),
+             _pct(a["raw_bytes"], a["bytes"])] for a in areas[:limit]]
+    return _md_or_none(["Area", "Raw data", "Share of all raw", "Share of the area"], body) + \
+        _showing(len(body), len(areas), "areas")
+
+
+def t_links(s, limit=10):
+    """Symlinks from one area into another, or out of the scanned target."""
+    rows = _rows(s["life_cycle"]["links"]["top"])
+    def name(p):                                    # "." = a folder outside every area
+        return {"(outside)": "(outside the target)", ".": "(other folders)"}.get(p) or _code(p)
+    body = [[name(r["from"]), name(r["to"]), _n(r["links"])] for r in rows[:limit]]
+    return _md_or_none(["From", "To", "Links"], body)
+
+
+_SHARED = (("Reference genomes, indexes, annotation", ("reference",), "reference"),
+           ("Container images", ("container",), "container"))
+
+
+def t_shared(s):
+    """Resources several areas each hold: candidates for one shared lab copy."""
+    areas = _rows(s["areas"]["table"])
+    across = {r["kind"]: r for r in _rows(s["life_cycle"]["copied_across_areas"])}
+
+    def largest(key):
+        top = sorted((a for a in areas if key(a)), key=lambda a: (-key(a), a["path"]))[:3]
+        return ", ".join(_code(a["path"]) for a in top)
+
+    def copied(kind):
+        r = across.get(kind)
+        return (f"{C.human_bytes(r['reclaimable'])} in {_plural(r['groups'], 'group', 'groups')}"
+                if r else "none found")
+    body = []
+    for label, cats, kind in _SHARED:
+        held = [a for a in areas if _cat(a, *cats)]
+        body.append([label, _n(len(held)), C.human_bytes(sum(_cat(a, *cats) for a in held)),
+                     copied(kind), largest(lambda a, c=cats: _cat(a, *c))])
+    envs = [a for a in areas if a["envs"]]
+    body.append([f"Software environments ({_n(sum(a['envs'] for a in envs))})", _n(len(envs)),
+                 C.human_bytes(sum(a["env_bytes"] for a in envs)), "not compared",
+                 largest(lambda a: a["env_bytes"])])
+    return _md(["Resource", "Areas holding it", "Size", "Copies across areas", "Largest in"], body)
+
+
+def t_old_areas(s, limit=12):
+    """Top-level areas by bytes not changed in old_years, with former members' bytes."""
+    yrs = _old_years(s)
+    newest = {r["path"]: r["newest"] for r in _rows(s["folders"])}
+    areas = sorted((a for a in _rows(s["areas"]["table"]) if a["old_bytes"] or a["former_bytes"]),
+                   key=lambda a: (-a["old_bytes"], a["path"]))
+    body = [[_code(a["path"]), C.human_bytes(a["bytes"]), C.human_bytes(a["old_bytes"]),
+             _pct(a["old_bytes"], a["bytes"]), C.human_bytes(a["former_bytes"]) if a["former_bytes"] else "",
+             newest.get(a["path"]) or ""] for a in areas[:limit]]
+    return _md_or_none(["Area", "Size", f"Unchanged {yrs}+ years", "Share of the area",
+                        "Former members' data", "Newest file"], body) + _showing(
+        len(body), len(areas), "areas")
+
+
 TABLES = {name[2:]: fn for name, fn in globals().items() if name.startswith("t_")}
 
 # ------------------------------------------------------------- fixed sentences (facts)
@@ -879,6 +1028,69 @@ def f_unreadable(s):
     return out
 
 
+def _min_dup(s) -> str:
+    return _size(s.get("post_stats", {}).get("dupes", {}).get("min_size", 0))
+
+
+def f_raw_access(s):
+    areas = _rows(s["areas"]["table"])
+    raw = sorted((a for a in areas if a["raw_bytes"]), key=lambda a: (-a["raw_bytes"], a["path"]))
+    total = sum(a["raw_bytes"] for a in raw)
+    across = {r["kind"]: r for r in _rows(s["life_cycle"]["copied_across_areas"])}.get("raw")
+    ln = s["life_cycle"]["links"]
+    out = [f"- **Where:** {C.human_bytes(total)} of raw data in {_n(len(raw))} of "
+           f"{_n(len(areas))} areas" + (
+               f"; {_code(raw[0]['path'])} holds {_pct(raw[0]['raw_bytes'], total)} of it."
+               if raw else ".")]
+    out.append("- **Copied:** " + (
+        f"{C.human_bytes(across['reclaimable'])} of raw files ≥ {_min_dup(s)} are copies of "
+        f"files in another area ({_plural(across['groups'], 'group', 'groups')}, "
+        f"{across['areas']} areas)." if across else
+        f"no raw files ≥ {_min_dup(s)} have copies in another area."))
+    out.append(f"- **Linked:** {_n(ln['cross_area'])} symlinks point from one area into another "
+               f"and {_n(ln['outside'])} outside the target, of {_n(ln['n'])} symlinks.")
+    return out
+
+
+def f_shared(s):
+    areas = _rows(s["areas"]["table"])
+    ref = [a for a in areas if _cat(a, "reference")]
+    envs = [a for a in areas if a["envs"]]
+    return [f"- **Kept per area:** reference data in {_n(len(ref))} areas, software "
+            f"environments in {_n(len(envs))}; copies are compared only for files ≥ {_min_dup(s)}, "
+            "so smaller indexes and environments aren't counted as copies."]
+
+
+def f_old(s):
+    yrs, year, tb = _old_years(s), int(s["generated"][:4]), s["totals"]["bytes"] or 1
+    u = s["users"]
+    out = []
+    for n in (yrs, 5):
+        b = _old_bytes(s, n)
+        out.append(f"- **{n}+ years:** {C.human_bytes(b)} ({_pct(b, tb)}) last changed in "
+                   f"{year - n} or earlier.")
+    grp = s.get("run", {}).get("target_group")
+    out.append(f"- **Former members:** {_plural(u['former'], 'account', 'accounts')} not in the "
+               + (f"`{grp}` group" if grp else "lab's group") + " (or deleted) own "
+               f"{C.human_bytes(u['former_bytes'])} ({_pct(u['former_bytes'], tb)}); "
+               f"{_n(u['active'])} owners are current members.")
+    out.append("- Dates are file modification times; membership is the FASRC unix group.")
+    return out
+
+
+def f_areas(s):
+    areas = sorted((a["bytes"] for a in _rows(s["areas"]["table"])), reverse=True)
+    tb = s["totals"]["bytes"] or 1
+    cum, k90 = 0, 0
+    for b in areas:
+        cum += b
+        k90 += 1
+        if cum >= 0.9 * tb:
+            break
+    return [f"- **Concentration:** the 3 largest of {_n(len(areas))} areas hold "
+            f"{_pct(sum(areas[:3]), tb)} of the bytes; {_n(k90)} hold 90%."]
+
+
 FACTS = {name[2:]: fn for name, fn in globals().items() if name.startswith("f_")}
 
 # ------------------------------------------------------------- charts (HTML only)
@@ -894,18 +1106,32 @@ def _glance(s) -> list[tuple[str, str, str]]:
     """(value, label, detail) for the at-a-glance row; a tile whose data is missing is left out."""
     t, tb = s["totals"], s["totals"]["bytes"] or 1
     out = [(C.human_bytes(t["bytes"]), "scanned", f"{_n(t['files'])} files, {_n(t['dirs'])} folders")]
-    tiles = (
-        lambda: (C.human_bytes(s["duplicates"]["reclaimable_bytes"]), "likely duplicate copies",
-                 f"{_pct(s['duplicates']['reclaimable_bytes'], tb)} of the total"),
+    dup = (lambda: (C.human_bytes(s["duplicates"]["reclaimable_bytes"]), "likely duplicate copies",
+                    f"{_pct(s['duplicates']['reclaimable_bytes'], tb)} of the total"))
+    if s.get("mode") == "survey":                  # the lab's data life cycle
+        yrs, u, ds = _old_years(s), s.get("users", {}), s.get("dir_status", {})
+        tiles = (
+            dup,
+            lambda: (lambda b: (_pct(b, tb), f"unchanged {yrs}+ years", C.human_bytes(b)))(
+                _old_bytes(s, yrs)),
+            lambda: (C.human_bytes(u["former_bytes"]), "former members' data",
+                     f"{_pct(u['former_bytes'], tb)} of the total"),
+            lambda: (f"{_n(u['active'])} / {_n(u['former'])}", "active / former members",
+                     f"{_n(u['n'])} file owners in all"),
+            lambda: (_n(ds.get("unreadable", 0) + ds.get("sensitive", 0)), "folders not scanned",
+                     "unreadable, or skipped as credential stores"),
+        )
+    else:
+      tiles = (
+        dup,
         lambda: (C.human_bytes(dict((r["category"], r["bytes"]) for r in _rows(s["by_category"]))
                                .get("raw", 0)), "raw data",
                  f"in {_n(s['raw_locations']['dirs'])} folders"),
         lambda: (_n(s["users"]["n"]), "owner" if s["users"]["n"] == 1 else "owners",
                  _plural(len(_mixed_rows(s)), "folder", "folders") + " with mixed ownership"),
         lambda: (lambda b: (_pct(b, tb), "unchanged 2+ years", C.human_bytes(b)))(
-            sum(r["bytes"] for r in _rows(s["age_by_year"])
-                if r["year"] and int(r["year"]) <= int(s["generated"][:4]) - 2)),
-    )
+            _old_bytes(s, 2)),
+      )
     for tile in tiles:
         try:
             out.append(tile())
@@ -921,7 +1147,57 @@ CHART_MD = {
     "owners": lambda s: ["*Figure: owner shares of the largest and the mixed folders "
                          "(in report.html).*"],
     "glance": lambda s: [f"- **{v}** {label} ({d})" for v, label, d in _glance(s)],
+    "areas": lambda s: ["*Figure: what each area holds, with its share unchanged "
+                        f"{_old_years(s)}+ years and owned by former members (in report.html).*"],
 }
+
+# content groups for the areas chart: (label, colour slot, categories; None = the rest)
+_CONTENT = (("raw", "k1", ("raw",)), ("processed", "k0", ("processed",)),
+            ("reference", "k2", ("reference",)), ("software", "k6", ("code-env", "container")),
+            ("other", "ko", None))
+
+
+def c_areas(s, limit: int = 15) -> str:
+    """Content-mix bars: one 100% bar per area, plus size, old and former shares."""
+    rows = _rows(s["areas"]["table"])
+    if not rows:
+        raise KeyError("areas rows")
+    yrs = _old_years(s)
+    esc = lambda x: html.escape(str(x), quote=True)  # noqa: E731
+    named = {c for _, _, cats in _CONTENT if cats for c in cats}
+
+    def groups(a):
+        cats = dict(a["by_category"])
+        return [(label, k, sum(cats.get(c, 0) for c in cs) if cs else
+                 sum(b for c, b in cats.items() if c not in named)) for label, k, cs in _CONTENT]
+    pick = rows[:limit]
+    rest = rows[limit:]
+    if rest:
+        tot = {"path": f"other ({len(rest)} areas)", "bytes": sum(a["bytes"] for a in rest),
+               "old_bytes": sum(a["old_bytes"] for a in rest),
+               "former_bytes": sum(a["former_bytes"] for a in rest), "by_category": []}
+        acc: dict = defaultdict(int)
+        for a in rest:
+            for c, b in a["by_category"]:
+                acc[c] += b
+        tot["by_category"] = list(acc.items())
+        pick = pick + [tot]
+    out = ['<figure class="ob ar"><ul>']
+    out += [f'<li><i class="{k}"></i>{label}</li>' for label, k, _ in _CONTENT]
+    out.append(f'</ul><div class="r h"><span></span><span></span><span>size</span>'
+               f'<span>{yrs}+ yrs</span><span>former</span></div>')
+    for a in pick:
+        gs = groups(a)
+        tot = sum(b for _, _, b in gs) or 1
+        segs = "".join(f'<s class="{k}" style="width:{100 * b / tot:.2f}%" title="{label}: '
+                       f'{esc(C.human_bytes(b))} ({esc(_pct(b, tot))})"></s>'
+                       for label, k, b in gs if b)
+        out.append(f'<div class="r"><code title="{esc(a["path"])}">{esc(a["path"])}</code>'
+                   f'<div class="bar">{segs}</div><span class="n">{esc(C.human_bytes(a["bytes"]))}'
+                   f'</span><span class="n">{esc(_pct(a["old_bytes"], a["bytes"]))}</span>'
+                   f'<span class="n">{esc(_pct(a["former_bytes"], a["bytes"]) if a["former_bytes"] else "")}'
+                   "</span></div>")
+    return "".join(out) + "</figure>"
 
 
 def c_glance(s) -> str:
@@ -1121,10 +1397,12 @@ CHARTS = {name[2:]: fn for name, fn in globals().items() if name.startswith("c_"
 
 # the blocks each template asks for; a report missing one gets a warning
 REQUIRED = {
-    "survey": ("chart:sunburst", "facts:scope", "facts:storage", "areas_top", "areas_detail", "small_files",
-               "facts:pipeline", "pipeline_workdirs", "touched_old", "users", "age", "facts:age",
-               "facts:types", "types", "raw_data", "unknown_types", "sensitive",
-               "facts:duplicates", "duplicates", "facts:unreadable", "unreadable",
+    "survey": ("chart:glance", "chart:sunburst", "facts:raw_access", "raw_access", "links",
+               "facts:shared", "shared", "facts:old", "old_areas", "age", "facts:types",
+               "types", "raw_data", "unknown_types", "sensitive", "chart:areas", "facts:areas",
+               "areas_top", "areas_detail", "small_files", "facts:pipeline",
+               "pipeline_workdirs", "touched_old", "users", "facts:duplicates", "duplicates",
+               "facts:scope", "facts:storage", "facts:unreadable", "unreadable",
                "size_histogram", "by_category"),
     "deep": ("chart:glance", "chart:sunburst", "chart:owners", "owners", "mixed_folders",
              "areas_top", "areas_detail", "small_files", "touched_old", "raw_data",
@@ -1170,11 +1448,11 @@ def expand(md: str, summary: dict) -> tuple[str, list[str]]:
 
 
 # words of the agent's own prose per section (tables and generated blocks don't count)
-BUDGETS = {"survey": {"Key findings": 160, "Scope and method": 20, "Storage usage": 60,
-                      "Areas": 90, "Users": 60, "Age": 60, "Data types": 90,
-                      "Big duplicates": 90, "Unreadable directories": 60,
-                      "Recommended deep audits": 60, "Questions for the PI": 140,
-                      "Flagged content": 40, "Appendix": 30},
+BUDGETS = {"survey": {"Key findings": 160, "Data life cycle": 270, "Data types": 90,
+                      "Areas": 90, "Users": 60, "Big duplicates": 90,
+                      "Recommended deep audits": 60, "Flagged content": 40,
+                      "Scope and method": 20, "Storage usage": 60,
+                      "Unreadable directories": 60, "Appendix": 30},
            "deep": {"Key findings": 160, "Organization observations": 200, "Ownership": 90,
                     "Per-folder overview": 90, "Raw data": 90, "Duplicates": 90,
                     "Flagged content": 40, "Scope and method": 20, "Storage usage": 60,

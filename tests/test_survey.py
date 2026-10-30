@@ -175,7 +175,7 @@ def test_summary_v2_shape_and_budget(lab, tmp_path):
         for d in locked:
             d.chmod(0o700)
     s = _summary(run_dir)
-    assert s["schema_version"] == summary.SUMMARY_VERSION == 3
+    assert s["schema_version"] == summary.SUMMARY_VERSION == 4
     assert stats["summarize"]["bytes"] == os.path.getsize(os.path.join(run_dir, "summary.json"))
     assert stats["summarize"]["bytes"] < summary.WARN_BYTES
 
