@@ -231,6 +231,52 @@ def test_peek_formats(tmp_path):
     assert _summary(run_dir)["peeks"]["injection_suspects"] == ["docs/NOTES.md"]
 
 
+def test_peek_skips_files_swapped_after_scan(tmp_path):
+    """A file replaced between scan and post, or reached through a dir swapped for a
+    symlink, is another inode: it is reported as 'changed' and never read."""
+    t, outside = tmp_path / "t", tmp_path / "outside"
+    (t / "d").mkdir(parents=True)
+    outside.mkdir()
+    (t / "a.txt").write_text("scanned\n")
+    (t / "d" / "b.txt").write_text("scanned\n")
+    (outside / "b.txt").write_text("outside the target\n")
+    audits = tmp_path / "audits"
+    plan.main([str(t), "--audits-dir", str(audits), "--name", "r"])
+    run_dir = str(audits / "r")
+    scan.run_task(run_dir)
+
+    (t / "new.txt").write_text("swapped in\n")
+    os.replace(t / "new.txt", t / "a.txt")                  # same path, another inode
+    (t / "d" / "b.txt").unlink()
+    (t / "d").rmdir()
+    (t / "d").symlink_to(outside)                           # parent dir now leads outside
+    post.run_post(run_dir, min_size=KB, chunk=4 * KB, min_dir_bytes=KB, workers=1)
+
+    by = {p["path"]: p for p in _peeks(run_dir)}
+    for rel in ("a.txt", "d/b.txt"):
+        assert by[rel]["error"] == "changed"
+        assert not {"magic", "lines", "format"} & set(by[rel])
+
+
+@pytest.mark.parametrize("url, ok", [
+    ("https://example.org/a_b?x=1#y", True), ("mailto:x@example.org", True),
+    ("report.html#scope", True), ("#scope", True),
+    ("javascript:alert(1)", False), ("JaVaScRiPt:x", False), ("data:text/html,x", False),
+    ("\x01javascript:alert(1)", False), ("\x7fjavascript:x", False),
+    ("java\x0bscript:x", False),
+])
+def test_safe_url(url, ok):
+    assert (render._safe_url(url) is not None) is ok
+    # through the full inline pass too: a refused URL stays plain text, never an href
+    assert ("<a href" in render.inline(f"[x]({url})")) is ok
+
+
+def test_safe_url_entities_stay_literal():
+    # report.md is escaped before links are parsed, so "&#1;" is text, not a control
+    # character: the href is the inert relative URL "&#1;javascript:x"
+    assert 'href="&amp;#1;javascript:x"' in render.inline("[x](&#1;javascript:x)")
+
+
 def test_render_escapes_and_structures():
     md = """# Audit of `lab`
 

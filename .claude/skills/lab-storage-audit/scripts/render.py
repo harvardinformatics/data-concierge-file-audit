@@ -121,7 +121,12 @@ _NUM = re.compile(r"^[~<>≈]?\s*[-+]?[\d.,]+\s*(%|[KMGTP]i?B|B|[KMGT]|x)?$")
 
 
 def _safe_url(u: str) -> str | None:
-    u = html.unescape(u).strip()
+    """The escaped URL if it is http(s), mailto or relative; else None. Browsers drop control
+    characters and spaces before reading a scheme ("\\x01javascript:" runs as javascript:),
+    so a URL containing any is refused rather than taken as relative."""
+    u = html.unescape(u)
+    if re.search(r"[\x00-\x20\x7f]", u):
+        return None
     if re.match(r"^(https?:|mailto:)", u, re.I) or not re.match(r"^[a-z][a-z0-9+.-]*:", u, re.I):
         return html.escape(u, quote=True)
     return None
