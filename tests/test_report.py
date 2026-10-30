@@ -518,3 +518,13 @@ def test_render_table_blocks():
     assert '<details class="tb" open><summary>Files by year' in page     # first under ###
     assert '<details class="tb" open><summary>Recommended deep audits' in page
     assert page.index('<div class="pt"><ul><li><strong>Patterns:') < page.index('class="tb"')
+
+
+def test_render_refuses_old_summary(tmp_path):
+    """An older summary.json stops render.py before it writes anything."""
+    (tmp_path / "report.md").write_text("# R\n\n{{table:age}}\n")
+    (tmp_path / "summary.json").write_text(json.dumps({"schema_version": 3, "mode": "deep"}))
+    with pytest.raises(SystemExit):
+        render.main(["--run", str(tmp_path)])
+    assert (tmp_path / "report.md").read_text() == "# R\n\n{{table:age}}\n"
+    assert not (tmp_path / "report.html").exists()

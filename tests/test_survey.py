@@ -262,12 +262,6 @@ def test_folder_newest_ignores_dir_mtimes(tmp_path):
     assert folders["old"]["newest"] == folders["old/sub"]["newest"] == "2020-09-13"
     assert folders["old"]["last_activity"] > "2020-09-13"     # the dirs' own (today's) mtime
     assert "empty" not in folders or folders["empty"]["newest"] is None
-    con = _db(run_dir)                                  # a DB built before activity_mtime
-    con.execute("ALTER TABLE dirs DROP COLUMN activity_mtime")
-    con.commit()
-    con.close()
-    _post(run_dir, stages=["rollup", "summarize"])
-    assert rows(_summary(run_dir)["folders"])[0]["last_activity"]
 
 
 def test_sensitive_breakdown(tmp_path):

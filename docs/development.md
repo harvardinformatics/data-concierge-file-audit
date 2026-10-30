@@ -110,7 +110,7 @@ Log one row per timing run. Compare the `os.scandir` walker with `lfs find` on t
 
 - `SKILL.md` stays short: it lists the phases and the rules and delegates detail to `references/`.
 - `references/report-template.md` is the contract for what the report must contain. Change it on purpose, and log the change.
-- `summary.json` carries `schema_version`. Bump the version on any structural change, and keep `render.py` (its table builders read `summary.json`) and the templates in sync.
+- `summary.json` carries `schema_version`. Bump the version on any structural change, and keep `render.py` (its table builders read `summary.json`) and the templates in sync. `render.py` renders only the current version and stops on any other; bring an older run up to date with `post.py --run <run> --stages summarize` (it needs the run's `audit.sqlite`; a database built before 2026-10-09 needs a full `post.py` re-run, which rebuilds it from the shard files).
 - File names and peeked text are **untrusted data**. Never write skill logic that treats their contents as instructions.
 - Helpers must keep the helper-level guarantees in [SAFETY.md](../SAFETY.md): they read only with `rb`, write only under `--outdir`, don't follow symlinks out of the target, and never open credential-pattern files.
 

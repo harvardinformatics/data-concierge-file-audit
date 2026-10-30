@@ -238,8 +238,6 @@ def rollup(db: sqlite3.Connection, min_dir_bytes: int, tree_dups: bool = True) -
     # newest_mtime is the newest *file* below (when the data last changed). activity_mtime
     # also counts dir mtimes, which move whenever an entry is added, renamed or removed
     # (when anyone last touched the tree). A reorganisation moves only the second.
-    if "activity_mtime" not in {r[1] for r in cur.execute("PRAGMA table_info(dirs)")}:
-        cur.execute("ALTER TABLE dirs ADD COLUMN activity_mtime INT")   # DBs from before 10-09
     dirs = cur.execute("SELECT path, parent, name, depth, status, mtime FROM dirs "
                        "ORDER BY depth DESC").fetchall()
     kids: dict[str, list] = {}

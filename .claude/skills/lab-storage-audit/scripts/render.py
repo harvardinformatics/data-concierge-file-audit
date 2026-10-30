@@ -535,7 +535,7 @@ def t_areas_top(s):
 def t_areas_detail(s, limit=15):
     rows = sorted((r for r in _rows(s["folders"]) if r["level"] == 2),
                   key=lambda r: (-r["bytes"], r["path"]))
-    total = s.get("folder_levels", {}).get("2", len(rows))
+    total = s["folder_levels"]["2"]
     return _md(_FOLDER_HEAD, _folder_rows(s, rows[:limit])) + _showing(
         min(limit, len(rows)), total, "folders at this level")
 
@@ -562,7 +562,8 @@ MIXED = 0.8      # a folder is mixed when no file owner holds this share of its 
 
 
 def _owner_shares(r: dict) -> list[tuple[str, int]]:
-    """[(owner, bytes)] of a folders row, largest first, 'others' last (v3 summaries)."""
+    """[(owner, bytes)] of a folders row, largest first, 'others' last. A folder with one
+    owner has an empty `owners` list, so that owner comes from `top_owner`."""
     own = [(u, b) for u, b in r.get("owners") or []]
     if not own and r.get("top_owner"):
         own = [(r["top_owner"], r["bytes"])]
@@ -668,7 +669,7 @@ def t_duplicates(s, limit=12):
                          C.human_bytes(g["reclaimable_outside_pipeline_work"]),
                          where + (f" (+{more} more)" if more > 0 else "")])
     n_groups = _total(s, "duplicates.top_groups", d["top_groups"])
-    n_pairs = d.get("n_dir_overlap", len(d["dir_overlap"]["rows"]))
+    n_pairs = d["n_dir_overlap"]
     return _md_or_none(["Item", "Copies", "Size each", "Reclaimable", "Where"], body) + (
         [f"Largest first: {len(body):,} items from {n_groups:,} duplicate groups and {n_pairs:,} "
          "folder pairs outside pipeline work."] if body else [])
@@ -770,7 +771,7 @@ def t_sensitive(s, limit=5):
     rows = _rows(x["top_dirs_elsewhere"])[:limit]
     body = [[name, _n(r["files"])] for name, r in zip(_paths(r["dir"] for r in rows), rows)]
     return _md_or_none(["Folder with credential-like names (outside software environments)",
-                        "Files"], body) + _showing(len(body), x.get("n_dirs_elsewhere", 0), "folders")
+                        "Files"], body) + _showing(len(body), x["n_dirs_elsewhere"], "folders")
 
 
 SMALL_AVG = 1 << 20          # "many small files": average under 1 MiB ...
@@ -899,7 +900,7 @@ def f_scope(s):
         return _code(q) + (" (this tool's repo, always excluded)"
                            if os.path.realpath(p) == str(C.REPO_ROOT) else "")
     roots = [x for x in r.get("roots", ["."]) if x != "."]
-    read = (f"- **Read:** metadata for {_n(t['files'])} files, {_n(t.get('symlinks', 0))} "
+    read = (f"- **Read:** metadata for {_n(t['files'])} files, {_n(t['symlinks'])} "
             f"symlinks and {_n(t['dirs'])} directories")
     if dp.get("candidates"):
         err = dp.get("hash_errors", 0)
@@ -925,7 +926,7 @@ def f_scope(s):
 def f_storage(s):
     t = s["totals"]
     hl = s.get("duplicates", {}).get("hardlinks", {}).get("saved_bytes", 0)
-    inodes = t["files"] + t["dirs"] + t.get("symlinks", 0) + t.get("other", 0)
+    inodes = t["files"] + t["dirs"] + t["symlinks"] + t["other"]
     return [f"- **Scanned:** {C.human_bytes(t['bytes'])} by path in {_n(t['files'])} files"
             + (f"; {C.human_bytes(hl)} of that is extra paths to hardlinked files, so about "
                f"{C.human_bytes(t['bytes'] - hl)} is on disk." if hl else "."),
@@ -962,7 +963,7 @@ def f_types(s):
             f"{_n(unk.get('files', 0))} files with {_n(s['unknown_exts']['n'])} different extensions.",
             f"- **Credential-like names:** {_n(x['files'])} files, {_n(x['in_code_env'])} of them "
             f"inside software environments; {_n(x['elsewhere'])} elsewhere, in "
-            f"{_n(x.get('n_dirs_elsewhere', 0))} folders. Matched by name only, never opened"
+            f"{_n(x['n_dirs_elsewhere'])} folders. Matched by name only, never opened"
             + (f"; {_n(skipped)} folders with such names weren't scanned." if skipped else ".")]
 
 
@@ -975,7 +976,7 @@ def f_duplicates(s):
            + f"; {C.human_bytes(d['reclaimable_bytes'])} could be reclaimed, "
            f"{C.human_bytes(d['reclaimable_bytes_outside_pipeline_work'])} of it outside pipeline "
            f"work ({_n(d['file_groups_outside_pipeline_work'])} groups). "
-           f"{_n(d.get('n_dir_overlap', 0))} pairs of folders share duplicate files.",
+           f"{_n(d['n_dir_overlap'])} pairs of folders share duplicate files.",
            "- **Method:** " + ("full hashes; confirmed duplicates." if d.get("confirmed") else
                                "size plus a partial hash, so these are likely duplicates, not "
                                "byte-confirmed.")
@@ -1486,6 +1487,9 @@ def main(argv=None) -> int:
     if os.path.exists(sj):
         with open(sj, encoding="utf-8") as fh:
             summary = json.load(fh)
+        if summary.get("schema_version") != S.SUMMARY_VERSION:
+            C.die(f"summary.json is schema {summary.get('schema_version')}, render.py needs "
+                  f"{S.SUMMARY_VERSION}: re-run `post.py --run {args.run} --stages summarize`")
         md, used = expand(md, summary)
         C.log(f"filled: {', '.join(used) or 'none'}")
         mode = summary.get("mode", "deep")
