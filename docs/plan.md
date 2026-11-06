@@ -38,7 +38,9 @@ CLAUDE.md        # project guidance; follows ~/.claude/CLAUDE.md; points to docs
       post.py      # stages merge -> dupes -> rollup (totals, Merkle, dir dups) -> classify -> peek -> summarize; defaults per mode
       dupes.py     # file duplicates, hardlinks, parent-dir overlap
       classify.py  # rules.toml -> type/ext stats, raw_locations, dir_markers
-      render.py    # report.md -> self-contained report.html (inline CSS, no CDN)
+      render.py    # report.md -> self-contained report.html (inline CSS, no CDN): fill, lint, CLI
+      mdhtml.py    # Markdown -> the HTML page (escaping, CSS, collapsible sections)
+      report_tables.py, report_facts.py, report_charts.py   # {{table|facts|chart:NAME}} blocks
       rules.toml   # extension/magic/marker-file rules (tomllib; edit w/o code)
       scan_array.sbatch, post.sbatch
 tests/           # pytest unit tests on tiny tmp_path trees (dedupe/classify logic only)
@@ -98,7 +100,7 @@ audits/          # gitignored; audits/<lab>_<date>/
 
 ## Safety and enforcement (layered)
 - **The helpers themselves**:
-  - open target files `rb` only
+  - open target files read-only (`common.open_ro`), and read contents (hash, peek) only if the inode matches the scan's record
   - write only under `--outdir`
   - never follow symlinks out of the target
   - skip `.ssh`, `.gnupg`, `secrets/`, `.env*` and key files (deny list reused from `agent-guards/global/settings.json`)
@@ -225,10 +227,13 @@ Policy links point to docs.rc.fas.harvard.edu instead of restating the policy.
 - 2026-10-29: **Survey report around the data life cycle (report-polish).** Schema 4 adds per-area content, old and former-member bytes and cross-area copies and links; the survey template opens with glance tiles, the sunburst and Key findings, then Data life cycle (raw access, shared resources, old data and former members), Data types, Areas (content-mix bars) and the rest; Questions for the PI removed, Flagged content optional. Both dev surveys re-summarized and rewritten in `audits/report-dev/survey-polish/`.
 - 2026-10-28: **Deep report redesign (report-polish).** Summary schema 3 keeps ownership (each folder's top owners and own owner, each user's main folders). The deep template now opens with glance tiles, the sunburst, Key findings and Organization observations, then Ownership (owner bars, `owners`, `mixed_folders`), folders, raw data and duplicates; it describes and never recommends (no reorganization or questions sections). Facts blocks, merged duplicates, small-file and recently-touched tables, and word-budget lint now apply to deep reports too. Mixed-ownership dev targets are being mined from the whole-lab survey DB (`audits/dev-notes/`).
 - 2026-10-30: **Patterns first, tables collapsible (report-polish).** In survey and deep templates each Patterns slot now comes before its section's tables; `report.html` folds every table into a labelled block, with only the first under each heading open. Previews of both surveys and the three deep audits are in `audits/report-dev/table-collapse/` (decisions.md 2026-10-30).
+- 2026-10-30: **Security fixes from a code review (branch `code-polish`).** `render.py` refuses link URLs containing control characters or spaces (a leading `\x01` let `javascript:` through as a "relative" link). `peek.py` reads a file only if it is still the inode the scan recorded, as `dupes.py` already did, so a file replaced after the scan, or reached through a parent dir swapped for a symlink, is reported as `changed`, not read. Tests in `tests/test_report.py` (decisions.md 2026-10-30).
+- 2026-10-30: **render.py cleanup and split (`code-polish`).** Dead tables and duplicated helpers removed; the blocks a report needs are read from its template; `render.py` renders only `summary.json` schema 4 and `post.py` drops its pre-10-09 migration; then `render.py` (1,540 lines) split into `mdhtml.py`, `report_tables.py`, `report_facts.py` and `report_charts.py` with every definition moved unchanged. Three real reports (one deep, two surveys) render byte-identical through all three commits; the baseline is in `audits/code-dev/render-regress/` (decisions.md 2026-10-30).
 
 ## Open items (revisit)
+- **Directory swap race in the walk** (code review, 2026-10-30). `scan.py` and `plan.py` `lstat` a directory, then list it by path, so a directory replaced by a symlink in between would have the symlink target's listing (metadata only, within the auditor's own permissions) recorded. Fix if needed: open the dir with `O_DIRECTORY | O_NOFOLLOW` and `os.scandir(fd)`. **Not fixing** (user, 2026-11-06): unlikely in this use case; revisit if a real exposure appears.
 - **Survey/deep modes: implemented 2026-10-05, cluster verification pending.** See [plans/survey-mode.md](plans/survey-mode.md) Verification steps 2–6.
-- **Deep report template** still has slots that restate its tables ("Biggest items", per-row notes). Move it to facts blocks, the merged duplicates table and the lint once the survey format is settled.
+- ~~**Deep report template** still has slots that restate its tables ("Biggest items", per-row notes). Move it to facts blocks, the merged duplicates table and the lint once the survey format is settled.~~ **Done 2026-10-28** (deep report redesign): deep reports use facts blocks, the merged duplicates table and the lint, and the template has no "Biggest items" slot.
 - **Calibrate the survey's 256 MiB duplicate threshold** from the whole-lab survey's `size_histogram` (arbitrary starting point; user, 2026-10-02).
 - **Post `/scratch` high-water at lab scale**: not logged by post; the whole-lab survey's database (~0.4 GB per million files) is a lower bound. Log `/scratch` use in post if it matters.
 - **Areas detail level for a whole-lab target.** The detail table is fixed at 2 levels below the target. For a lab root, projects sit one level deeper (`Lab/projects/<user>`), so check the first whole-lab survey's table and decide whether the level should be settable per run.

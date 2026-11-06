@@ -2,6 +2,7 @@
 
 Safety contract (keep in sync with SAFETY.md):
   * Target files are opened only through open_ro(): O_RDONLY | O_NOFOLLOW | O_NONBLOCK.
+    Content readers (dupes, peek) read a file only if its inode matches the scan's.
   * Outputs are written only inside the run directory (out_path() enforces it),
     and the run directory must not be inside the target unless it sits under an
     excluded path (this repo is auto-excluded when the target contains it).

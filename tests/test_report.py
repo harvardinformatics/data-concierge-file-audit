@@ -6,9 +6,12 @@ import re
 
 import pytest
 
+import mdhtml
 import plan
 import post
 import render
+import report_charts
+import report_tables
 import scan
 from conftest import snapshot
 
@@ -173,7 +176,7 @@ def test_render_survey_life_cycle(lab, tmp_path):
     post.run_post(run_dir, stages=["summarize"])
     s = _summary(run_dir)
     assert s["mode"] == "survey" and s["areas"]["old_years"] == 3
-    tiles = render._glance(s)
+    tiles = report_charts._glance(s)
     assert [t[1] for t in tiles] == ["scanned", "likely duplicate copies", "unchanged 3+ years",
                                      "former members' data", "active / former members",
                                      "folders not scanned"]
@@ -229,6 +232,52 @@ def test_peek_formats(tmp_path):
     assert by["NOTES.md"]["injection_suspect"] is True
     assert by["table.tsv"]["injection_suspect"] is False
     assert _summary(run_dir)["peeks"]["injection_suspects"] == ["docs/NOTES.md"]
+
+
+def test_peek_skips_files_swapped_after_scan(tmp_path):
+    """A file replaced between scan and post, or reached through a dir swapped for a
+    symlink, is another inode: it is reported as 'changed' and never read."""
+    t, outside = tmp_path / "t", tmp_path / "outside"
+    (t / "d").mkdir(parents=True)
+    outside.mkdir()
+    (t / "a.txt").write_text("scanned\n")
+    (t / "d" / "b.txt").write_text("scanned\n")
+    (outside / "b.txt").write_text("outside the target\n")
+    audits = tmp_path / "audits"
+    plan.main([str(t), "--audits-dir", str(audits), "--name", "r"])
+    run_dir = str(audits / "r")
+    scan.run_task(run_dir)
+
+    (t / "new.txt").write_text("swapped in\n")
+    os.replace(t / "new.txt", t / "a.txt")                  # same path, another inode
+    (t / "d" / "b.txt").unlink()
+    (t / "d").rmdir()
+    (t / "d").symlink_to(outside)                           # parent dir now leads outside
+    post.run_post(run_dir, min_size=KB, chunk=4 * KB, min_dir_bytes=KB, workers=1)
+
+    by = {p["path"]: p for p in _peeks(run_dir)}
+    for rel in ("a.txt", "d/b.txt"):
+        assert by[rel]["error"] == "changed"
+        assert not {"magic", "lines", "format"} & set(by[rel])
+
+
+@pytest.mark.parametrize("url, ok", [
+    ("https://example.org/a_b?x=1#y", True), ("mailto:x@example.org", True),
+    ("report.html#scope", True), ("#scope", True),
+    ("javascript:alert(1)", False), ("JaVaScRiPt:x", False), ("data:text/html,x", False),
+    ("\x01javascript:alert(1)", False), ("\x7fjavascript:x", False),
+    ("java\x0bscript:x", False),
+])
+def test_safe_url(url, ok):
+    assert (mdhtml._safe_url(url) is not None) is ok
+    # through the full inline pass too: a refused URL stays plain text, never an href
+    assert ("<a href" in mdhtml.inline(f"[x]({url})")) is ok
+
+
+def test_safe_url_entities_stay_literal():
+    # report.md is escaped before links are parsed, so "&#1;" is text, not a control
+    # character: the href is the inert relative URL "&#1;javascript:x"
+    assert 'href="&amp;#1;javascript:x"' in mdhtml.inline("[x](&#1;javascript:x)")
 
 
 def test_render_escapes_and_structures():
@@ -405,7 +454,7 @@ def test_render_ownership():
          "by_category": {"cols": ["category", "files", "bytes"], "rows": [["raw", 2, 250]]},
          "raw_locations": {"dirs": 3},
          "age_by_year": {"cols": ["year", "files", "bytes"], "rows": [["2020", 4, 400], ["2026", 6, 600]]}}
-    mixed = [r["path"] for r in render._mixed_rows(s)]
+    mixed = [r["path"] for r in report_tables._mixed_rows(s)]
     assert mixed == ["a/x", "c"]          # '.' and 'a' have a flagged subfolder; c: folder owner differs
     out, used = render.expand("{{table:owners}}\n{{table:mixed_folders}}\n{{chart:glance}}\n", s)
     assert "| ann | 600 B | 60.0% | 6 | `a` 83.3% | 2026-01-01 |  |" in out
@@ -445,12 +494,12 @@ def test_render_collapsed_sections():
 
 def test_short_paths():
     long = "Lab/projects/projC/pipeline/pipeline-workflows/data/species-one-set/output/01-prep-stage/autosomes"
-    assert render._short(long) == "Lab/projects/projC/…/01-prep-stage/autosomes"
-    assert render._short("a/b/c") == "a/b/c"
+    assert report_tables._short(long) == "Lab/projects/projC/…/01-prep-stage/autosomes"
+    assert report_tables._short("a/b/c") == "a/b/c"
     twins = ["x/y/z/" + "m" * 70 + "/one/aws/util", "x/y/z/" + "m" * 70 + "/two/aws/util"]
-    a, b = render._paths(twins)
+    a, b = report_tables._paths(twins)
     assert a != b and "one" in a and "two" in b
-    a, b = render._pair(long, long.replace("species-one-set/output", "species-two-set/output-v3"))
+    a, b = report_tables._pair(long, long.replace("species-one-set/output", "species-two-set/output-v3"))
     assert a == "`Lab/projects/projC/…/species-one-set/…/autosomes`"
     assert b == "`Lab/projects/projC/…/species-two-set/…/autosomes`"
 
@@ -472,3 +521,13 @@ def test_render_table_blocks():
     assert '<details class="tb" open><summary>Files by year' in page     # first under ###
     assert '<details class="tb" open><summary>Recommended deep audits' in page
     assert page.index('<div class="pt"><ul><li><strong>Patterns:') < page.index('class="tb"')
+
+
+def test_render_refuses_old_summary(tmp_path):
+    """An older summary.json stops render.py before it writes anything."""
+    (tmp_path / "report.md").write_text("# R\n\n{{table:age}}\n")
+    (tmp_path / "summary.json").write_text(json.dumps({"schema_version": 3, "mode": "deep"}))
+    with pytest.raises(SystemExit):
+        render.main(["--run", str(tmp_path)])
+    assert (tmp_path / "report.md").read_text() == "# R\n\n{{table:age}}\n"
+    assert not (tmp_path / "report.html").exists()

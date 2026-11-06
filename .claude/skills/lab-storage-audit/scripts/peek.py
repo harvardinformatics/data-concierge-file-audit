@@ -10,7 +10,8 @@ the way a person would open one file of each kind to see what it is:
     goes to the other; within each side, keys by total bytes, round-robin, so
     every type is sampled before any type gets a second directory; at most
     `max_peeks` files in total, unknown ones listed first.
-Sensitive files are never opened. Target files are opened only via common.open_ro.
+Sensitive files are never opened. Target files are opened only via common.open_ro,
+and read only if they are still the inode the scan recorded.
 
 Writes <run>/peeks.jsonl and a `peeks` table. Raw bytes are never stored: only
 the first 16 bytes as hex, the compression, a detected format, a few parsed
@@ -117,15 +118,22 @@ def _features(lines: list[str]) -> dict:
     return {"kind": "text"}
 
 
-def peek_file(path: bytes, max_bytes: int) -> dict:
+def peek_file(path: bytes, ino: int, max_bytes: int) -> dict:
+    """Read and describe the first max_bytes of a scanned file. The open file must be the
+    inode the scan recorded, as in dupes.hash_file: a file replaced since, or one reached
+    through a parent dir swapped for a symlink, is reported as 'changed' and not read.
+    (Size may differ: a file that grew since the scan is still the one scanned.)"""
     out: dict = {}
     try:
         fd = C.open_ro(path)
     except OSError as ex:
         return {"error": f"open:{ex.strerror}"}
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             return {"error": "not a regular file"}
+        if st.st_ino != ino:
+            return {"error": "changed"}
         raw = os.read(fd, max_bytes)
     except OSError as ex:
         return {"error": f"read:{ex.strerror}"}
@@ -195,15 +203,15 @@ def run(db: sqlite3.Connection, run_dir: str, target: str, max_peeks: int,
     n = n_err = n_inj = 0
     with open(out + ".tmp", "w", encoding="utf-8") as fh:
         for key, fid in select(db, max_peeks):
-            d, draw, name, nraw, size, ftype, cat = cur.execute(
-                """SELECT f.dir, f.dir_raw, f.name, f.name_raw, f.size, c.ftype, c.category
+            d, draw, name, nraw, size, ino, ftype, cat = cur.execute(
+                """SELECT f.dir, f.dir_raw, f.name, f.name_raw, f.size, f.ino, c.ftype, c.category
                    FROM files f JOIN file_class c ON c.id = f.id WHERE f.id = ?""",
                 (fid,)).fetchone()
             if C.is_sensitive_file(name, d):        # belt and braces; scan already flags these
                 continue
             rel = name if d == "." else f"{d}/{name}"
-            rec = {"path": rel, "size": size, "ftype": ftype, "category": cat,
-                   "type_key": key, **peek_file(_abs_path(target, d, draw, name, nraw), max_bytes)}
+            rec = {"path": rel, "size": size, "ftype": ftype, "category": cat, "type_key": key,
+                   **peek_file(_abs_path(target, d, draw, name, nraw), ino, max_bytes)}
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             cur.execute("INSERT INTO peeks VALUES (?,?,?,?,?,?)",
                         (fid, rel, key, rec.get("format"), int(rec.get("injection_suspect", False)),

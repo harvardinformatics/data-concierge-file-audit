@@ -57,4 +57,5 @@ All under `.claude/skills/lab-storage-audit/scripts/`, and all take `--help`.
 - `rules.toml`: file-type and raw-data rules. `classify.load_rules` warns on unmatchable or duplicate extensions.
 - `scan_array.sbatch`, `post.sbatch`: submit from the repo root. The caller passes the partition, resources and `-o`/`-e`. `post` depends on the scan with `afterany`.
 - `render.py --run R`: fills the `{{table:NAME}}` data tables in `report.md` from `summary.json`, then writes a self-contained `report.html`.
+  - Its modules: `mdhtml.py` (Markdown → the HTML page: escaping, links, CSS, collapsible sections), `report_tables.py` (table builders and the shared path/number helpers), `report_facts.py` (fixed sentences) and `report_charts.py` (charts).
 - `.claude/hooks/log-action.sh`: PostToolUse hook that writes to `audits/<run>/agent-actions.log`. The run is chosen by `audits/.current-run`.
