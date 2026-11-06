@@ -17,7 +17,7 @@ interpretation. Names: see FACTS.
 Charts too: `{{chart:NAME}}` becomes a one-line caption in report.md and an inline
 SVG (with a small inline script for hover) in report.html. Names: see CHARTS.
 
-After filling, a survey report is linted (warnings only): prose over a section's
+After filling, the report is linted in both modes (warnings only): prose over a section's
 word budget, numbers that repeat a table or facts block in the same section, and
 hand-written row counts ("showing N of M"; the tables print their own).
 
