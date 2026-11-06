@@ -53,33 +53,61 @@ The skill audits a lab directory **read-only** and produces a report that the PI
 
 ## Flow and data diagrams
 
+In both diagrams, **blue rectangles** are scripts, **amber slanted boxes** are files written to `audits/<run>/` (the amber cylinder is the database), **purple rounded boxes** are Claude's own steps, and the **grey cylinder** is the lab directory being audited.
+
+### 1. Run flow: what the agent does and which SLURM jobs it starts
+
+The agent's steps from the PI's command to `report.html`, the scan and post jobs it submits, and what each job reads from the target.
+
 ```mermaid
-flowchart LR
+flowchart TB
   PI([PI runs /lab-storage-audit survey or deep TARGET]) --> AG
   subgraph AG[Agent · SKILL.md]
     direction TB
-    a1[1 Preflight: hostname, quota, mode] --> a2[plan.py --mode]
-    a2 --> a3[2 sbatch scan + post] --> a4[3 wait for post.DONE]
-    a4 --> a5[4 read summary.json + peeks.jsonl] --> a6[5 write report.md] --> a7[render.py]
+    a1(1 Preflight: hostname, quota, mode) --> a2[plan.py --mode]
+    a2 --> a3(2 sbatch scan + post) --> a4(3 wait for post.DONE)
+    a4 --> a5(4 read summary.json + peeks.jsonl) --> a6(5 write report.md) --> a7[render.py]
   end
   a3 -. SLURM .-> SC[scan.py × N tasks<br/>big shards split into children]
   SC -. afterany .-> PO[post.py]
   T[(TARGET, read-only)] -->|metadata| SC
   T -->|file slices / 64 KiB peeks, deep only| PO
-  a7 --> H[report.html]
+  a7 --> H[/report.html/]
+  classDef script fill:#dbeafe,stroke:#1d4ed8,color:#0b1f4d
+  classDef output fill:#fef3c7,stroke:#b45309,color:#451a03
+  classDef agent fill:#ede9fe,stroke:#6d28d9,color:#2e1065
+  classDef target fill:#e5e7eb,stroke:#374151,color:#111827
+  class a2,a7,SC,PO script
+  class H output
+  class a1,a3,a4,a5,a6 agent
+  class T target
 ```
 
+### 2. Data flow: the files each step writes and reads
+
+How the files in `audits/<run>/` are produced: `plan.py` → `scan.py` → the `post.py` stages → the agent → `render.py`.
+
 ```mermaid
-flowchart LR
-  P[plan.py] --> R[run.json<br/>shards.tsv]
-  R --> S[scan.py] --> SH[shards/id.files.tsv.gz<br/>shards/id.dirs.tsv.gz<br/>shards/id.done lists children<br/>scan.taskI.DONE]
+flowchart TB
+  P[plan.py] --> R[/"run.json<br/>shards.tsv"/]
+  R --> S[scan.py] --> SH[/"shards/id.files.tsv.gz<br/>shards/id.dirs.tsv.gz<br/>shards/id.done lists children<br/>scan.taskI.DONE"/]
   SH --> M
-  subgraph PO[post.py stages → audit.sqlite]
+  subgraph PO[post.py stages]
     M[merge] --> D[dupes] --> RU[rollup] --> C[classify] --> PK[peek, deep only] --> SU[summarize]
   end
-  PK --> PJ[peeks.jsonl]
-  SU --> SJ[summary.json]
-  SJ & PJ --> AG[agent] --> MD[report.md] --> RE[render.py] --> HT[report.html]
+  PO --> DB[(audit.sqlite)]
+  PK --> PJ[/peeks.jsonl/]
+  SU --> SJ[/summary.json/]
+  SJ & PJ --> AG(agent) --> MD[/report.md/] --> RE[render.py] --> HT[/report.html/]
+  SJ --> RE
+  DB -. drill-down queries .-> AG
+  classDef script fill:#dbeafe,stroke:#1d4ed8,color:#0b1f4d
+  classDef output fill:#fef3c7,stroke:#b45309,color:#451a03
+  classDef agent fill:#ede9fe,stroke:#6d28d9,color:#2e1065
+  classDef target fill:#e5e7eb,stroke:#374151,color:#111827
+  class P,S,M,D,RU,C,PK,SU,RE script
+  class R,SH,PJ,SJ,MD,HT,DB output
+  class AG agent
 ```
 
 ## Scripts (`.claude/skills/lab-storage-audit/scripts/`)
@@ -96,7 +124,7 @@ flowchart LR
 | ↳ `classify.py` | | `rules.toml` assigns each file a type and category (raw, processed, reference, …). Also produces raw-data locations and dir markers (Nextflow, git, conda, Illumina). | — |
 | ↳ `peek.py` | | Deep only. One file per (dir, type); ~60% of the budget for unknown types, the rest for known ones with raw first; ≤ 300 files, ≤ 64 KiB each. Records magic bytes, compression, format, features, ≤ 8 short lines, and an injection flag. A file whose inode changed since the scan is skipped (`changed`). | ≤ 300 × 64 KiB |
 | ↳ `summary.py` | | Capped, versioned aggregates (schema 4, compact `{cols, rows}` tables; folders keep their top owners and own owner, users their main folders; `areas` and `life_cycle` give each top-level area's content, old and former-member bytes, and raw data, references and containers copied or linked across areas). Workflow scratch (`work/`, `.snakemake/`) is separated, so staging copies aren't counted as duplicates. Unreadable dirs are grouped by parent; credential-like names are split into inside software environments vs elsewhere; a file-size histogram calibrates the survey threshold. | — |
-| `render.py` | agent shell | Fills each `{{table:NAME}}` line in `report.md` with a fixed table and each `{{facts:NAME}}` line with fixed sentences (totals, coverage, method) from `summary.json`, rewriting `report.md` (re-renders regenerate them). Each `{{chart:NAME}}` line becomes a caption in `report.md` and an inline-SVG chart with a small inline hover script in `report.html` (`sunburst`: folder sizes by ring, coloured by each folder's main owner, hatched where no owner holds 80%; `owners`: 100% bars of owner shares; `glance`: a row of headline tiles, bullets in `report.md`). Deep reports also get ownership tables (`owners`, `mixed_folders`), facts blocks and word-budget lint; Key findings and Organization observations are drawn as call-outs. Lints survey prose (word budgets, numbers repeated from tables). Then `report.md` → self-contained `report.html`: each table is a collapsible block labelled by its caption (only the first under each heading open; the Patterns call-out above them), and each `##` section is a collapsible block, closed by default for a mode's background sections (`COLLAPSED`; deep: scope, storage, pipeline intermediates, unreadable, appendix) and for any section that is only "None…"; nav links open their section, and printing opens everything. Escapes everything and keeps only safe links. Renders only the current `summary.json` schema. Code: `render.py` (fill, lint, CLI), `mdhtml.py` (the page), and the blocks in `report_tables.py`, `report_facts.py` and `report_charts.py`. | — |
+| `render.py` | agent shell | Fills each `{{table:NAME}}` line in `report.md` with a fixed table and each `{{facts:NAME}}` line with fixed sentences (totals, coverage, method) from `summary.json`, rewriting `report.md` (re-renders regenerate them). Each `{{chart:NAME}}` line becomes a caption in `report.md` and an inline-SVG chart with a small inline hover script in `report.html` (`sunburst`: folder sizes by ring, coloured by each folder's main owner, hatched where no owner holds 80%; `owners`, deep only: 100% bars of owner shares; `glance`: a row of headline tiles, bullets in `report.md`; `areas`, survey only: one 100% bar per top-level area showing what it holds, with its old and former-member shares). Deep reports also get ownership tables (`owners`, `mixed_folders`). Key findings and Organization observations are drawn as call-outs. Lints the prose in both modes (warnings only): per-section word budgets, numbers repeated from the section's tables, and hand-written row counts. Then `report.md` → self-contained `report.html`: each table is a collapsible block labelled by its caption (only the first under each heading open; the Patterns call-out above them), and each `##` section is a collapsible block, closed by default for a mode's background sections (`COLLAPSED`; deep: scope, storage, pipeline intermediates, unreadable, appendix; survey: scope, storage, unreadable, appendix) and for any section that is only "None…"; nav links open their section, and printing opens everything. Escapes everything and keeps only safe links. Renders only the current `summary.json` schema. Code: `render.py` (fill, lint, CLI), `mdhtml.py` (the page), and the blocks in `report_tables.py`, `report_facts.py` and `report_charts.py`. | — |
 | `log-action.sh` (hook) | every tool call | Appends each command and file read to `agent-actions.log`. | — |
 
 Full promises are in [SAFETY.md](../SAFETY.md). Design history is in [plan.md](plan.md) and [decisions.md](decisions.md).
