@@ -165,10 +165,11 @@ Read [SAFETY.md](SAFETY.md). It explains exactly what the audit reads, what it c
 
 ## Quickstart (once released)
 
-Start an interactive job first. The agent waits for its scan jobs, so don't run it on a login node:
+An audit has two steps. Run one audit at a time per clone of this repo: the action log follows the current run.
+
+**Step 1: plan and submit.** A login node is fine for this part:
 
 ```bash
-salloc -p test -c 1 --mem=4G -t 0-6:00:00
 git clone <repo-url> data-concierge-file-audit
 cd data-concierge-file-audit
 module load python
@@ -184,11 +185,25 @@ Then, inside Claude Code, run one of these:
 
 If you leave out the mode, the audit picks one for you: a survey for a lab root or for anything over about 5 million files, and otherwise a deep audit.
 
-What happens next:
+What happens:
 1. The agent checks your quota and proposes a scan plan. It asks whether any folders are sensitive and should be skipped.
 2. It shows you the exact SLURM jobs and resources, and **asks your approval** before submitting them.
-3. It waits for the jobs to finish, then writes `audits/<run>/report.html` and `report.md`.
-4. Review the report, then send it to the Data Concierge team. A survey ends by offering the top recommended deep audit.
+3. It tells you the run name and when to expect the results, and stops. You can exit Claude.
+
+You get **one email** from Slurm, at the address listed with your FASRC account, when the audit is ready or if anything failed. Either way, the next step is the same.
+
+**Step 2: resume and get the report.** Interpreting the results needs a compute node, so start an interactive job first. It only needs to cover writing the report, not the scan; take the limits from the [partition table](https://docs.rc.fas.harvard.edu/kb/running-jobs/#Slurm_Partitions), for example:
+
+```bash
+salloc -p test -c 1 --mem=4G -t 0-2:00:00
+cd data-concierge-file-audit
+module load python
+claude
+```
+
+Then run `/lab-storage-audit resume <run>` (without `<run>`, it resumes the most recent run). The agent shows the run's state, waits if the jobs are still running, then writes `audits/<run>/report.html` and `report.md`. Review the report, then send it to the Data Concierge team. A survey ends by offering the top recommended deep audit.
+
+If you start step 1 inside `salloc` instead, the agent can wait there and write the report in the same session; it suggests this for small deep audits.
 
 Job time depends on file count, plus queue time. In our test runs, a survey of tens of millions of files took about an hour or more. A deep audit of a few million files took from about 20 minutes to over an hour, depending on how many same-size files needed comparing.
 

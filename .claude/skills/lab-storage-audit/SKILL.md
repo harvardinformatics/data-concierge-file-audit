@@ -1,10 +1,10 @@
 ---
 name: lab-storage-audit
-description: Read-only audit of a lab's FASRC storage for the FAS Informatics Data Concierge team. A quick survey maps a whole lab and recommends where to look deeper; a deep audit of one project or user dir finds duplicates, raw-data locations, per-folder and per-user usage, and unreadable or stale dirs. Writes report.md and report.html to audits/<run>/. Use it when the user runs /lab-storage-audit [survey|deep] <TARGET> or asks to audit a lab directory.
-argument-hint: "[survey|deep] <TARGET directory>"
+description: Read-only audit of a lab's FASRC storage for the FAS Informatics Data Concierge team. A quick survey maps a whole lab and recommends where to look deeper; a deep audit of one project or user dir finds duplicates, raw-data locations, per-folder and per-user usage, and unreadable or stale dirs. Writes report.md and report.html to audits/<run>/. Use it when the user runs /lab-storage-audit [survey|deep] <TARGET> or /lab-storage-audit resume [<run>], or asks to audit a lab directory.
+argument-hint: "[survey|deep] <TARGET directory> | resume [<run>]"
 ---
 
-# /lab-storage-audit [survey|deep] <TARGET>
+# /lab-storage-audit [survey|deep] <TARGET> · /lab-storage-audit resume [<run>]
 
 You audit `<TARGET>` **read-only** and write a report for the PI to review and send to Data Concierge. The scripts are in `.claude/skills/lab-storage-audit/scripts/`, and each takes `--help`. Run every command from the repo root. Set `S=.claude/skills/lab-storage-audit/scripts` inside each Bash command; shell variables don't carry over between commands.
 
@@ -13,6 +13,16 @@ You audit `<TARGET>` **read-only** and write a report for the PI to review and s
 - **deep**: the full audit of one project or user dir (`--only REL`): duplicates from 1 MiB, content samples, raw-data checks.
 
 If the PI doesn't name a mode, use **survey** for a lab root, or when `quota` shows more than about 5 million files; otherwise **deep**. Say which you chose and why.
+
+**`resume [<run>]`** picks up a run whose jobs were submitted in an earlier session: see "Resume" below.
+
+## Where each phase runs
+
+Run `hostname` first. A login node is `*login*` with no `$SLURM_JOB_ID` set.
+- **Phases 1–2** (preflight, plan, submit) are light and may run on a login node or a compute node.
+- **Phases 3–5** (wait, interpret, report) need a compute node. On a login node, stop after phase 2 and give the PI the resume steps (phase 2's last step).
+- If it's FASSE, follow SAFETY.md's FASSE section.
+- **One audit session at a time per repo checkout.** The action log follows `audits/.current-run`, so a second audit session in the same checkout would send this session's log lines to its run. If the PI wants two audits at once, use two clones.
 
 ## Rules (from SAFETY.md, which must stay true)
 
@@ -28,16 +38,23 @@ If the PI doesn't name a mode, use **survey** for a lab root, or when `quota` sh
 ## Phases
 
 1. **Preflight**
-   - Run `hostname`. If it's a login node (`*login*`, no `$SLURM_JOB_ID`), stop and ask the PI to restart Claude inside `salloc`; the agent shouldn't run on a shared login node. If it's FASSE, follow SAFETY.md's FASSE section.
+   - Run `hostname` (see "Where each phase runs").
    - Run `quota <TARGET>` for tier usage and file count; keep the output for the "Storage" section. Never use `du`.
    - Run `module load python && python3 $S/plan.py <TARGET> --mode <survey|deep> [--only REL …] [--exclude P …]`.
      - It prints one line: run dir, mode, shard count, excludes. It excludes this repo automatically if it's inside the target.
      - Tell the PI the run name, mode, shard count, and excludes. Ask about any directories that are sensitive and must not be sampled; pass those as `--exclude`.
 2. **Scan and post** (SLURM)
-   - Production uses `serial_requeue`; dev uses `test` or a partition the user names. Take limits from https://docs.rc.fas.harvard.edu/kb/running-jobs/#Slurm_Partitions, or from `spart` for partitions not listed there. Never paste a partition maximum in as a request.
+   - **Partitions.** Production: the scan on `serial_requeue`, and post on `shared`. Post must not be preemptable: a preempted job sends its own email (below). Dev: `test` for both, or a partition the user names. Take limits from https://docs.rc.fas.harvard.edu/kb/running-jobs/#Slurm_Partitions, or from `spart` for partitions not listed there. Never paste a partition maximum in as a request.
    - Size the jobs from the `quota` file count with the table below, with about 3× margin on time. Big subtrees split into child shards on the fly, so more walkers help up to the cap of 16.
    - **Cores.** Scan walkers wait on Lustre, not CPU (~10–25% CPU each), so walkers are about requests in flight, not cores: request **`-c 2` per task and pass `--workers 8`** after the run dir (8 walkers per task; a survey uses `--array=0-1`, a deep audit one task, `--array=0`). Post is single-threaded apart from hashing, whose workers also wait on I/O: request **`-c 1`** and pass `--workers 4` after the run dir. Extra cores sit idle, and FASRC flags such jobs.
+   - **Email: exactly one per audit.** Add `--mail-type=END` to the **post** `sbatch` line only, never to the scan and never as an `#SBATCH` line. Post runs after the scan whatever happens to it (`afterany`), so its END mail arrives either when the results are ready or when anything failed (the subject then shows FAILED). Slurm sends it to the email address listed with the PI's FASRC account. If the PI wants another address, add `--mail-user=<addr>` to that command line; never write an address into a file.
    - Show the PI the exact commands and resources, then submit them using the usage lines at the top of `scan_array.sbatch` and `post.sbatch`. Post depends on the scan with `afterany`, and picks its stages from the run's mode.
+   - **After submitting**, write `audits/<run>/jobs.json` with the Write tool:
+     `{"scan": {"job_id": …, "partition": …, "time": "<-t>", "array": "<--array>"}, "post": {"job_id": …, "partition": …, "time": "<-t>"}, "submitted": "<ISO time>", "expected_finish": "<ISO time>", "mail": {"type": "END", "to": "account default" | "custom (command line)"}}`.
+     `expected_finish` is the submit time plus the sizing table's estimate for scan and post (without the 3× margin), plus a few minutes of queue time.
+   - **Then tell the PI** the run name and the expected finish, and that a single email will come when the audit is ready or has failed; either way the next step is `resume`. Then:
+     - On a **login node**: stop here. Give the PI the resume steps: start an interactive job (`salloc -p <partition> -c 1 --mem=4G -t <time>`, limits from the partition table, sized for interpreting the results, not for waiting on the scan), then `cd` to this repo, `module load python`, `claude`, and `/lab-storage-audit resume <run>`.
+     - On a **compute node**: offer to wait here (phase 3) or to exit and resume after the email. Recommend waiting for a small deep audit (minutes), and exiting for a survey (1–2 h).
 
    | Per million files (approximate, from dev runs; slower for trees with many dirs or tiny files) | |
    |---|---|
@@ -47,7 +64,8 @@ If the PI doesn't name a mode, use **survey** for a lab root, or when `quota` sh
    | post memory | not per million: ~2.4–4.7 GB peak on surveys of tens of millions of files (request 12G); ~3.1 GB on a 2.2M-file deep audit (request 8G) |
    | scan memory | not per million: up to ~6 GB for an 8-walker task on tens of millions of files (request 12G per task); ~2.4 GB on a 2.2M-file project (request 6G) |
    | `audit.sqlite` | ~0.25–0.4 GB in `audits/<run>/`; post builds it on node-local `/scratch` first, so that much again there. Post refuses to start if either place has less than ~24× the gzipped shard files free |
-3. **Wait** until `audits/<run>/post.DONE` or `post.FAILED` exists: a background `until [ -e …DONE ] || [ -e …FAILED ]; do sleep 60; done`.
+3. **Wait** (compute node only) until `audits/<run>/post.DONE` or `post.FAILED` exists: a background `until [ -e …DONE ] || [ -e …FAILED ]; do sleep 60; done`.
+   - A sentinel is overdue once `jobs.json`'s `expected_finish` has passed. Only then may you check the job IDs from `jobs.json` with one `squeue`/`sacct` call, at most once per 10 minutes.
    - On `FAILED`, read the sentinel JSON and `audits/<run>/slurm/*.err`, explain the failure, and stop.
 4. **Interpret**
    - Read `audits/<run>/summary.json` in full with the Read tool, not with Bash or scripts. It's capped by design and has one table row per line (schema 4: tables are `{cols, rows}`, dates `YYYY-MM-DD`). If one Read is too large, read it in two parts with `offset`/`limit`. The template's "Reading `summary.json`" notes explain `capped`, dates and units.
@@ -58,3 +76,15 @@ If the PI doesn't name a mode, use **survey** for a lab root, or when `quota` sh
    - **Don't write data tables or fixed facts yourself.** Where the template shows `{{table:NAME}}`, `{{facts:NAME}}` or `{{chart:NAME}}`, write exactly that line; your part is the interpretation in the template's slots.
    - Then run `python3 $S/render.py --run audits/<run>`. It fills every table, facts block and chart from `summary.json`, rewrites `report.md` with them, and writes `report.html` (charts appear only there). For a survey it also prints `WARNING`s for sections over their word budget, prose that repeats a number from its tables, and hand-written row counts. Fix the text (or add a missing marker) and run it again until there are none.
 6. **Hand-off.** Tell the PI where `report.md`, `report.html`, `summary.json`, and `agent-actions.log` are. Ask them to skim the report before sending it to Data Concierge. Remind them nothing was changed or deleted: every clean-up item is a recommendation. After a survey, offer to start the top recommended deep audit.
+
+## Resume: `/lab-storage-audit resume [<run>]`
+
+1. **Point the action log at the run first.** With a `<run>` argument, keep only the characters `[A-Za-z0-9._-]` (the hook's filter), then make your **first tool call** a Write of that name to `audits/.current-run` (the Write tool, not `echo`). Without an argument, the run is the first line of `audits/.current-run`, which already points there.
+2. Check that `audits/<run>/run.json` exists. If not, tell the PI and ask for the run name.
+3. Run `hostname`. On a login node, stop and give the PI the resume steps from phase 2.
+4. Read `run.json` and `jobs.json`, and list `audits/<run>/` for sentinels. Tell the PI the run's target, mode and created date, the sentinel state, and the expected finish. A run without `jobs.json` (submitted before this file existed) has no expected finish: say so.
+5. Continue on the sentinels:
+   - `post.DONE`: phase 4.
+   - `post.FAILED`: phase 3's failure handling.
+   - neither: phase 3, wait.
+6. Use the mode in `run.json` (survey or deep) to choose the template in phase 5, then finish with phase 6.
