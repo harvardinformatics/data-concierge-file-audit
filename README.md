@@ -169,7 +169,7 @@ Start an interactive job first. The agent waits for its scan jobs, so don't run 
 
 ```bash
 salloc -p test -c 1 --mem=4G -t 0-6:00:00
-git clone <repo-url> data-concierge-file-audit
+git clone https://github.com/harvardinformatics/data-concierge-file-audit.git
 cd data-concierge-file-audit
 module load python
 claude
