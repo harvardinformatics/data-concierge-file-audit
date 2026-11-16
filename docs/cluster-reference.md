@@ -9,6 +9,7 @@ These sections were copied and adapted on 2026-09-30 from the FASRC `agent-guard
 - Run `hostname` first. A name matching `*login*` (`bosloginXX`/`holyloginXX`) with no `$SLURM_JOB_ID` set means you are on a **login node**.
 - A login node is fine for editing, git, `module avail`, and reading small files such as `summary.json`. It is never fine for walks over the target, hashing, or anything multi-core or multi-minute. Use `sbatch` for those, or `salloc` for interactive dev.
 - The login node shares storage mounts with compute nodes, so don't do bulk file operations there either (tar, rsync, full scans).
+- FASRC's wording (https://docs.rc.fas.harvard.edu/kb/responsibilities/, fetched 2026-11-16): "Login nodes are meant as gateways to launching and monitoring jobs, to run light processes to prepare your jobs or environment." cgroups limit "each logged-in account to 1 core and 8GB of memory", and a process over that is killed. The skill's phases 1–2 (preflight, `plan.py`, `sbatch`) fit this; phases 3–5 run inside `salloc` (`docs/spec.md`, "Where each phase runs, and why").
 - Anything that must survive a disconnect goes through `sbatch`. Never background work under `salloc` with `nohup`, `setsid`, or `&`, because an idle `salloc` dies after about an hour.
 - Source: `cannoncluster/SKILL.md` ("Where am I?"). Responsibilities/AUP: https://docs.rc.fas.harvard.edu/kb/responsibilities/
 
@@ -17,6 +18,7 @@ These sections were copied and adapted on 2026-09-30 from the FASRC `agent-guard
 | Use | Partition | Notes |
 |---|---|---|
 | Dev / debug | `test` | Official table (fetched 2026-09-30): 12 h max, **Max Jobs 5**, Max Cores 112, 990 GB/node, not charged fairshare, multi-partition submits forbidden. **Project rule: at most 3 jobs queued or running, array tasks included** (the user's cap, stricter than the official 5). Throttle arrays with `--array=…%N`. |
+| Production post | `shared` | Official table (fetched 2026-11-16): 3 days max, no core cap listed, 172 GB/node, not preemptable. Post goes here, not on `serial_requeue`, because a preempted and requeued job sends its own END email (Slurm 26.05.5 source, `job_completion_logger`), which would break "one email per audit". |
 | Production scan | `serial_requeue` | Official table: 3 days max, no job or core cap listed, memory "varies". For "jobs that require up to 8 cores … or job arrays where each job instance uses less than 8 cores". Default partition when `-p` is omitted. Jobs **can be preempted and requeued**, so helpers must be idempotent and use `--open-mode=append`. |
 
 Cluster-wide limits (same page): 10,100 jobs per user, max array size 10,000, and each array index counts as a job. Defaults: 1 core, 100 MB memory, no default time.
@@ -24,6 +26,7 @@ Cluster-wide limits (same page): 10,100 jobs per user, max array size 10,000, an
 - **Never guess resource limits** (`-t`, `--mem`, `-c`). Set them per partition from the official table: https://docs.rc.fas.harvard.edu/kb/running-jobs/#Slurm_Partitions. On FASSE, use https://docs.rc.fas.harvard.edu/kb/fasse/#SLURM_and_Partitions. Never paste a partition maximum in as a default.
 - Cannon defaults are minimal. The default memory is **100 MB**, and `-t` is **mandatory**.
 - Fairshare is lab-scoped: hours burned on `serial_requeue` count against the whole group. Mention the cost if a planned audit is large.
+- **Email** (same page): "If no mail user is specified, Slurm uses the email address that is listed with your account." The skill passes `--mail-type=END` on the post command line only; Slurm sends no email by default, so the scan, dev runs and tests stay silent. `END` also fires when a job fails, times out, is cancelled, or is preempted (Slurm source), so post's END mail covers every outcome. Never put `--mail-user` in a tracked file.
 - `#SBATCH` lines must come before any code. SLURM silently stops parsing directives after the first non-directive line.
 - Source: `cannoncluster/references/partitions.md`, `references/gotchas.md`.
 

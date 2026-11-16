@@ -17,7 +17,9 @@ How to develop and test the `lab-storage-audit` skill. Other docs:
   ```
   The helpers never import anything from the venv, and PIs don't need it.
 - **Where Claude runs:**
-  - **Start `claude` inside `salloc`**, not on a login node.
+  - The skill's phases 1–2 (preflight, `plan.py`, `sbatch`) may run on a login node. Phases 3–5 (wait, interpret, report) need a compute node; on a login node the skill stops after submitting, and `/lab-storage-audit resume [<run>]` inside `salloc` picks the run up (decisions.md, 2026-11-16).
+  - Login-node use depends on the sandbox staying off: with it on, `bwrap` hangs on login nodes (see "Sandbox verification").
+  - **One audit session at a time per repo checkout.** The hook routes the log by `audits/.current-run`, so overlapping sessions would mix their logs. Use a second clone for a second concurrent audit.
   - Anything that walks, hashes, or peeks into the target goes through `sbatch`.
   - For long interactive dev sessions, start Claude inside `salloc -p test …`. Take limits from the official partition table, not by guessing. See [cluster-reference.md](cluster-reference.md#partitions-for-this-skill).
 - **The sandbox is off** for initial development (`sandbox.enabled: false`; decisions.md, 2026-10-02). The permission rules in `.claude/settings.json` still apply. To bring the sandbox back, flip `enabled` and redo "Sandbox verification" below.

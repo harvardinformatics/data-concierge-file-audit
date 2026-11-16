@@ -4,12 +4,12 @@ The skill audits a lab directory **read-only** and produces a report that the PI
 
 ## What happens when you run it
 
-1. **You start it.** Inside an `salloc` session, run `claude` in this repo and type `/lab-storage-audit [survey|deep] /n/…/your_lab`. Claude loads `SKILL.md`, which lists the phases and the rules.
+1. **You start it.** Run `claude` in this repo, on a login node or inside `salloc`, and type `/lab-storage-audit [survey|deep] /n/…/your_lab`. Claude loads `SKILL.md`, which lists the phases and the rules. Planning and submitting (steps 2–3) are light enough for a login node; interpreting the results (steps 6–7) needs a compute node, so it runs inside `salloc`, either in the same session or later with `/lab-storage-audit resume [<run>]`. Only one audit session runs at a time per repo checkout, because the action log follows `audits/.current-run`.
    - **survey** maps a whole lab: metadata, duplicate checks on files ≥ 256 MiB, no peeks, and a short report ending in recommended deep audits.
    - **deep** audits one project or user dir (`--only`) with everything below. Each deep audit re-scans its scope.
    - Without a mode, Claude picks survey for a lab root or more than ~5M files.
 2. **Preflight (seconds).**
-   - Claude checks that it's not on a login node and runs `quota` for the tier's usage.
+   - Claude checks which kind of node it's on and runs `quota` for the tier's usage.
    - It runs `plan.py --mode …`. That lists only the top two levels (three in survey) of the lab directory and cuts the tree into **shards**, pieces for one worker to walk.
    - `plan.py` creates the run folder `audits/<run>/`.
    - Claude tells you the shard count and asks whether any folder should be excluded.
@@ -21,7 +21,10 @@ The skill audits a lab directory **read-only** and produces a report that the PI
    - classifies files with `rules.toml`
    - deep only: takes up to 300 small **peeks**, at most 64 KiB each from representative files (about 60% for unknown types, the rest for known types with raw data first)
    - writes `summary.json` (schema 4: tables as `{cols, rows}`, one row per line so the Read tool can show it, a `capped` index of shortened lists, target under 50 KB)
-5. **Claude waits** for the `post.DONE` marker file. It doesn't poll the scheduler.
+   - Claude writes `jobs.json` (job IDs, partitions, time limits, expected finish) and tells you when to expect the results. Post is submitted with `--mail-type=END`, so you get **one email** when the audit is ready or has failed.
+5. **Claude waits, or you come back later.**
+   - On a login node, Claude stops after submitting and gives you the resume steps: start `salloc`, then `claude`, then `/lab-storage-audit resume <run>`. Resume points the action log at the run, shows the run's target, mode and job state, and carries on from the sentinels.
+   - On a compute node, Claude offers to wait for the `post.DONE` marker file there (the default for a small deep audit) or to exit and resume after the email (the default for a survey). It doesn't poll the scheduler.
 6. **Claude interprets.**
    - It reads `summary.json` and the peeks, much as an analyst would. It works out what the unknown file types are, whether "raw" really is raw, and which copies are pipeline scratch versus real duplicates.
    - It may run a few small read-only queries on the database.
@@ -33,6 +36,7 @@ The skill audits a lab directory **read-only** and produces a report that the PI
 | File | Made by | What it is | Who uses it |
 |---|---|---|---|
 | `run.json`, `shards.tsv` | `plan.py` | run settings (including the mode) and the planned shards | scan, post |
+| `jobs.json` | **Claude** (Write tool, after submitting) | scan and post job IDs, partitions, `-t`, submit time, expected finish, mail settings | Claude on resume: when a sentinel is overdue, and which jobs to check |
 | `shards/*.tsv.gz`, `*.done` | `scan.py` | the metadata snapshot, one row per file; a `.done` lists any child shards | post |
 | `audit.sqlite` | `post.py` | snapshot plus analysis tables (duplicates, folder totals, types) | Claude's drill-down queries |
 | `peeks.jsonl` | `post.py` (peek, deep only) | per sampled file: format, features, and up to 8 short text lines | Claude only; **stays on the cluster** |
@@ -57,21 +61,27 @@ In both diagrams, **blue rectangles** are scripts, **amber slanted boxes** are f
 
 ### 1. Run flow: what the agent does and which SLURM jobs it starts
 
-The agent's steps from the PI's command to `report.html`, the scan and post jobs it submits, and what each job reads from the target.
+The agent's steps from the PI's command to `report.html`, the scan and post jobs it submits, and what each job reads from the target. Session 1 may run on a login node; session 2 runs inside `salloc`. When session 1 is already on a compute node, the PI can let it carry on as session 2 instead of exiting.
 
 ```mermaid
 flowchart TB
-  PI([PI runs /lab-storage-audit survey or deep TARGET]) --> AG
-  subgraph AG[Agent · SKILL.md]
+  PI([PI runs /lab-storage-audit survey or deep TARGET]) --> S1
+  subgraph S1[Session 1 · login or compute node]
     direction TB
     a1(1 Preflight: hostname, quota, mode) --> a2[plan.py --mode]
-    a2 --> a3(2 sbatch scan + post) --> a4(3 wait for post.DONE)
-    a4 --> a5(4 read summary.json + peeks.jsonl) --> a6(5 write report.md) --> a7[render.py]
+    a2 --> a3(2 sbatch scan + post, write jobs.json)
   end
   a3 -. SLURM .-> SC[scan.py × N tasks<br/>big shards split into children]
   SC -. afterany .-> PO[post.py]
   T[(TARGET, read-only)] -->|metadata| SC
   T -->|file slices / 64 KiB peeks, deep only| PO
+  PO -. one email: ready or failed .-> PI2([PI runs /lab-storage-audit resume run])
+  PI2 --> S2
+  subgraph S2[Session 2 · compute node, inside salloc]
+    direction TB
+    r0(point .current-run at the run, show its state) --> a4(3 wait for post.DONE)
+    a4 --> a5(4 read summary.json + peeks.jsonl) --> a6(5 write report.md) --> a7[render.py]
+  end
   a7 --> H[/report.html/]
   classDef script fill:#dbeafe,stroke:#1d4ed8,color:#0b1f4d
   classDef output fill:#fef3c7,stroke:#b45309,color:#451a03
@@ -79,7 +89,7 @@ flowchart TB
   classDef target fill:#e5e7eb,stroke:#374151,color:#111827
   class a2,a7,SC,PO script
   class H output
-  class a1,a3,a4,a5,a6 agent
+  class a1,a3,r0,a4,a5,a6 agent
   class T target
 ```
 
@@ -110,21 +120,40 @@ flowchart TB
   class AG agent
 ```
 
+## Where each phase runs, and why
+
+The agent's own work splits into a light half, which may run on a login node, and a heavy half, which runs on a compute node. The figures are rounded from dev runs (2026-11): a whole-lab survey of tens of millions of files and small deep audits.
+
+| Phase | Work | CPU | I/O on the target | I/O on `audits/` | Duration | Node |
+|---|---|---|---|---|---|---|
+| 1 Preflight | `hostname`, `quota` | negligible | one quota query to the Lustre servers | — | seconds | login or compute |
+| 1 Preflight | `plan.py`: directory listings down to depth 2 (survey 3), no file reads | under 0.1 s; ~20 MB RSS | `readdir` of at most a few thousand dirs | writes `run.json`, `shards.tsv` (KB) | under a second for a whole lab (warm metadata cache) | login or compute |
+| 2 Submit | two `sbatch` calls; Write `jobs.json` | negligible | — | KB | seconds | login or compute |
+| — | the Claude process itself | a few % of one core while working, ~0 while idle | — | appends to `agent-actions.log` | the whole session | login (session 1) or compute |
+| 3 Wait | a background `until … sleep 60` loop on the sentinel | ~0 | — | one `stat` a minute | the jobs' run time: minutes (deep) to 1–2 h (survey) | compute |
+| 4 Interpret | Read `summary.json` (≤ 50 KB) and `peeks.jsonl` | negligible | — | ≤ 1 MB | seconds | compute |
+| 4 Interpret | `audit.sqlite` drill-downs | an indexed query: under a second of CPU but up to ~30 s of reads; a full scan of a 24 GB survey database: ~20 s user + ~75 s system, ~1m40s wall | — | up to tens of GB read per full scan | seconds to minutes each | compute |
+| 5 Report | Write `report.md`; `render.py` | ~0.1 s; ~25 MB RSS | — | reads `summary.json`, writes `report.md`, `report.html` (~100 KB) | under a second | compute |
+
+**Why.** FASRC's [responsibilities page](https://docs.rc.fas.harvard.edu/kb/responsibilities/) says "Login nodes are meant as gateways to launching and monitoring jobs, to run light processes to prepare your jobs or environment", and that "the cluster login nodes … must be kept free of significant computation". Each account is limited to "1 core and 8GB of memory" there (cgroups), and a process over that is killed. Session 1 is exactly that kind of light, job-launching work: a bounded listing, a quota query and two submissions, with the Claude process (~0.4 GB RSS) as its largest user of memory. Waiting doesn't belong there: it can last hours, and an idle `salloc` would hold a core for all of that time just to watch a sentinel. Interpretation reads up to tens of GB from `audit.sqlite` and takes minutes of CPU on a whole-lab survey, so it runs inside `salloc`.
+
+One caveat: `plan.py` lists each dir above the depth limit in full and keeps its subdirectory paths before applying `--max-children`. A dir there with millions of *subdirectories* would cost a few hundred MB of memory, still within the login-node limit, and the listing is bounded by depth either way. It reads no file contents.
+
 ## Scripts (`.claude/skills/lab-storage-audit/scripts/`)
 
 | Script | Runs where | What it does | Reads from target |
 |---|---|---|---|
 | `common.py` | imported by all | The safety contract. `open_ro` opens files read-only and won't follow a final symlink or block on a FIFO; content readers (`dupes`, `peek`) also check the open file's inode against the scan's. `out_path` refuses writes outside the run dir. Also: credential-name patterns, TSV escaping, `ext_of`. | — |
-| `plan.py` | agent shell | A bounded listing of at most 2 levels (3 in survey). Each dir at the depth limit becomes one **tree** shard (walked recursively); dirs above it become **flat** shards (own files only). Excludes this repo automatically. Stores `--mode` in `run.json`. | top-level listings |
-| `scan.py` (`scan_array.sbatch`) | SLURM array | Task *i* walks the shards with id mod N == *i*, using `os.scandir` + `lstat`. Unreadable or sensitive dirs are recorded, not entered. A tree shard past `--split-files` entries splits into child shards `<id>.0`, `<id>.1`, … run by the same task. Per-shard output is atomic, and finished shards are skipped, so a requeued task resumes. | metadata only |
-| `post.py` (`post.sbatch`) | SLURM, after scan | Checks free space, then runs the mode's stages below into `audit.sqlite` (built on node-local disk), then writes `post.DONE` or `post.FAILED`. | see stages |
+| `plan.py` | agent shell (login or compute) | A bounded listing of at most 2 levels (3 in survey). Each dir at the depth limit becomes one **tree** shard (walked recursively); dirs above it become **flat** shards (own files only). Excludes this repo automatically. Stores `--mode` in `run.json`. | top-level listings |
+| `scan.py` (`scan_array.sbatch`) | SLURM array (`serial_requeue`; sends no email) | Task *i* walks the shards with id mod N == *i*, using `os.scandir` + `lstat`. Unreadable or sensitive dirs are recorded, not entered. A tree shard past `--split-files` entries splits into child shards `<id>.0`, `<id>.1`, … run by the same task. Per-shard output is atomic, and finished shards are skipped, so a requeued task resumes. | metadata only |
+| `post.py` (`post.sbatch`) | SLURM, after scan (`shared`, not preemptable; `--mail-type=END` on the command line, so one email per audit) | Checks free space, then runs the mode's stages below into `audit.sqlite` (built on node-local disk), then writes `post.DONE` or `post.FAILED`. | see stages |
 | ↳ `merge` | | Shard TSVs (planned and child shards) → tables `files`, `dirs`, `users` (with group membership). | — |
 | ↳ `dupes.py` | | Files ≥ 1 MiB (survey: ≥ 256 MiB) grouped by size, then a blake2b hash of the head, middle and tail (1 MiB each) gives "likely" duplicates. `--confirm` adds a full hash. Also finds hardlinks and folder overlap. | 3 MiB per candidate |
 | ↳ `rollup` | | Bottom-up totals per dir (newest *file* date, and last activity, which also counts directory dates) and a Merkle signature per tree, giving identical folder trees (deep only). | — |
 | ↳ `classify.py` | | `rules.toml` assigns each file a type and category (raw, processed, reference, …). Also produces raw-data locations and dir markers (Nextflow, git, conda, Illumina). | — |
 | ↳ `peek.py` | | Deep only. One file per (dir, type); ~60% of the budget for unknown types, the rest for known ones with raw first; ≤ 300 files, ≤ 64 KiB each. Records magic bytes, compression, format, features, ≤ 8 short lines, and an injection flag. A file whose inode changed since the scan is skipped (`changed`). | ≤ 300 × 64 KiB |
 | ↳ `summary.py` | | Capped, versioned aggregates (schema 4, compact `{cols, rows}` tables; folders keep their top owners and own owner, users their main folders; `areas` and `life_cycle` give each top-level area's content, old and former-member bytes, and raw data, references and containers copied or linked across areas). Workflow scratch (`work/`, `.snakemake/`) is separated, so staging copies aren't counted as duplicates. Unreadable dirs are grouped by parent; credential-like names are split into inside software environments vs elsewhere; a file-size histogram calibrates the survey threshold. | — |
-| `render.py` | agent shell | Fills each `{{table:NAME}}` line in `report.md` with a fixed table and each `{{facts:NAME}}` line with fixed sentences (totals, coverage, method) from `summary.json`, rewriting `report.md` (re-renders regenerate them). Each `{{chart:NAME}}` line becomes a caption in `report.md` and an inline-SVG chart with a small inline hover script in `report.html` (`sunburst`: folder sizes by ring, coloured by each folder's main owner, hatched where no owner holds 80%; `owners`, deep only: 100% bars of owner shares; `glance`: a row of headline tiles, bullets in `report.md`; `areas`, survey only: one 100% bar per top-level area showing what it holds, with its old and former-member shares). Deep reports also get ownership tables (`owners`, `mixed_folders`). Key findings and Organization observations are drawn as call-outs. Lints the prose in both modes (warnings only): per-section word budgets, numbers repeated from the section's tables, and hand-written row counts. Then `report.md` → self-contained `report.html`: each table is a collapsible block labelled by its caption (only the first under each heading open; the Patterns call-out above them), and each `##` section is a collapsible block, closed by default for a mode's background sections (`COLLAPSED`; deep: scope, storage, pipeline intermediates, unreadable, appendix; survey: scope, storage, unreadable, appendix) and for any section that is only "None…"; nav links open their section, and printing opens everything. Escapes everything and keeps only safe links. Renders only the current `summary.json` schema. Code: `render.py` (fill, lint, CLI), `mdhtml.py` (the page), and the blocks in `report_tables.py`, `report_facts.py` and `report_charts.py`. | — |
+| `render.py` | agent shell (compute) | Fills each `{{table:NAME}}` line in `report.md` with a fixed table and each `{{facts:NAME}}` line with fixed sentences (totals, coverage, method) from `summary.json`, rewriting `report.md` (re-renders regenerate them). Each `{{chart:NAME}}` line becomes a caption in `report.md` and an inline-SVG chart with a small inline hover script in `report.html` (`sunburst`: folder sizes by ring, coloured by each folder's main owner, hatched where no owner holds 80%; `owners`, deep only: 100% bars of owner shares; `glance`: a row of headline tiles, bullets in `report.md`; `areas`, survey only: one 100% bar per top-level area showing what it holds, with its old and former-member shares). Deep reports also get ownership tables (`owners`, `mixed_folders`). Key findings and Organization observations are drawn as call-outs. Lints the prose in both modes (warnings only): per-section word budgets, numbers repeated from the section's tables, and hand-written row counts. Then `report.md` → self-contained `report.html`: each table is a collapsible block labelled by its caption (only the first under each heading open; the Patterns call-out above them), and each `##` section is a collapsible block, closed by default for a mode's background sections (`COLLAPSED`; deep: scope, storage, pipeline intermediates, unreadable, appendix; survey: scope, storage, unreadable, appendix) and for any section that is only "None…"; nav links open their section, and printing opens everything. Escapes everything and keeps only safe links. Renders only the current `summary.json` schema. Code: `render.py` (fill, lint, CLI), `mdhtml.py` (the page), and the blocks in `report_tables.py`, `report_facts.py` and `report_charts.py`. | — |
 | `log-action.sh` (hook) | every tool call | Appends each command and file read to `agent-actions.log`. | — |
 
 Full promises are in [SAFETY.md](../SAFETY.md). Design history is in [plan.md](plan.md) and [decisions.md](decisions.md).

@@ -36,7 +36,7 @@ This repo contains a Claude Code skill, `/lab-storage-audit`, that the FAS Infor
 | Layer | What it enforces |
 |---|---|
 | **Helper scripts** (`.claude/skills/lab-storage-audit/scripts/`) | Open target files read-only, never when the file itself is a symlink, and read a file's contents only if it is still the file the scan recorded (same inode), so a file or folder swapped for a link after the scan can't redirect a read. Write only under `audits/<run>/`. Refuse to run if the output dir is inside the scanned tree (this repo is auto-excluded from scans). Never follow symlinks outside the target. Skip credential patterns. In `report.html`, escape everything taken from your files and keep only web, email and in-page links. |
-| **Claude Code sandbox** (`.claude/settings.json`) | **Currently off** (2026-10-02, during initial development): it hung on login nodes and broke group lookups and Slurm access on compute nodes. When it's on, it confines every shell command at the OS level (`bubblewrap`): writes only inside this repo, no reads of `/root` or credential dirs. It may return before release. Until then, the other layers carry the guarantees. |
+| **Claude Code sandbox** (`.claude/settings.json`) | **Currently off** (2026-10-02, during initial development): it hung on login nodes and broke group lookups and Slurm access on compute nodes. When it's on, it confines every shell command at the OS level (`bubblewrap`): writes only inside this repo, no reads of `/root` or credential dirs. It may return before release. Until then, the other layers carry the guarantees. Planning and submitting from a login node relies on it staying off: with it on, it hangs there, and the audit would have to run entirely inside `salloc` again. |
 | **Permission rules** (`.claude/settings.json`) | The agent may edit files only under `audits/` and `docs/`. Deleting, moving, `chmod`, `rsync`/`scp`, **every SLURM job submission**, and similar commands always ask you first. Reading credential files is denied outright. |
 | **SLURM jobs** | The heavy scanning runs as batch jobs, not on the shared login node. Batch jobs run outside any Claude Code sandbox, so the helper-script guarantees above are what protect your data there. The code is short, stdlib-only Python that you or FASRC can review. |
 | **Action log** | `audits/<run>/agent-actions.log` records every command the agent ran and every file it read, and is included with the report. |
@@ -45,7 +45,7 @@ The agent also treats everything it reads as data, never as instructions, includ
 
 ## Cluster resources
 
-- Scans run as SLURM jobs on `serial_requeue`, which uses idle capacity. Your lab's fairshare is charged for the core-hours used. Before submitting, the agent shows you the number of jobs and the requested resources, and waits for your OK.
+- Scans run as SLURM jobs on `serial_requeue`, which uses idle capacity; the single analysis job after it runs on `shared`. You get one email from Slurm when the audit is ready or has failed. Your lab's fairshare is charged for the core-hours used. Before submitting, the agent shows you the number of jobs and the requested resources, and waits for your OK.
 - Job status is tracked with small marker files rather than frequent queue queries, following FASRC's guidance on not overloading the scheduler.
 - It never uses `du` over your whole tree. Tier-level usage comes from FASRC's `quota` tool.
 

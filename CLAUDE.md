@@ -8,7 +8,7 @@ This repo holds the `lab-storage-audit` Claude Code skill (`.claude/skills/lab-s
 
 - The helpers are stdlib-only Python 3.14 (`module load python`). They run inside SLURM jobs.
 - Tests: `.venv/bin/python -m pytest tests/` (a gitignored dev venv; see `docs/development.md`), which uses tiny `tmp_path` trees only.
-- Run Claude inside `salloc`, not on a login node.
+- The skill's light half (preflight, `plan.py`, `sbatch`) may run on a login node; waiting, interpreting and reporting run inside `salloc` (`/lab-storage-audit resume [<run>]`). Dev sessions that edit or test code run inside `salloc`, not on a login node.
 - There's no build or lint tooling.
 
 Start with these docs:
@@ -31,7 +31,7 @@ This project follows `~/.claude/CLAUDE.md` and the `cannoncluster` skill. Projec
 - **Never walk the target from the agent.** No `ls -R`, `find`, `du`, or `lfs find` over a target. All walking, hashing, and peeking goes through the helper scripts inside `sbatch` jobs. Small reads of `audits/<run>/` outputs are fine anywhere.
 - **Partition:**
   - dev uses `test`, with **at most 3 jobs queued or running at once, array tasks included**; throttle arrays with `%N`
-  - production uses `serial_requeue`, so helpers must be idempotent under requeue
+  - production runs the scan on `serial_requeue`, so helpers must be idempotent under requeue, and post on `shared` (not preemptable, so its END email is the only one; decisions.md 2026-11-16)
   - resource limits come from https://docs.rc.fas.harvard.edu/kb/running-jobs/#Slurm_Partitions and are never guessed
 - **Job tracking:** use sentinel files (`<step>.DONE`/`.FAILED` in the run dir). At most one `squeue`/`sacct` call per 10 minutes, and only if a sentinel is overdue.
 - **Outputs:** job logs go to `audits/<run>/slurm/`. Nothing goes to the repo root or the target.
