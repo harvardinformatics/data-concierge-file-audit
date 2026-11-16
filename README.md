@@ -170,7 +170,8 @@ An audit has two steps. Run one audit at a time per clone of this repo: the acti
 **Step 1: plan and submit.** A login node is fine for this part:
 
 ```bash
-git clone <repo-url> data-concierge-file-audit
+salloc -p test -c 1 --mem=4G -t 0-6:00:00
+git clone https://github.com/harvardinformatics/data-concierge-file-audit.git
 cd data-concierge-file-audit
 module load python
 claude
